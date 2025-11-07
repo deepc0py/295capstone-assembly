@@ -31,6 +31,11 @@ from security import (
 # Import multi-scanner support
 from scanner_engines import multi_scanner
 
+# Import database and scan history (Week 2)
+from database import get_db, get_db_context, check_database_health
+from sqlalchemy.orm import Session
+import scan_history
+
 # Configuration
 SHARED_RESULTS = Path("/shared/results")
 SHARED_SPECS = Path("/shared/specs")
@@ -150,12 +155,20 @@ def split_openapi_spec_by_endpoints(spec_content: str, chunk_size: int = 4) -> L
 async def health_check():
     """Health check endpoint for Railway"""
     try:
+        # Check database connection (Week 2)
+        db_healthy, db_error = check_database_health()
+
         # Check Redis connection
         queue_stats = {"queue_length": 0, "active_workers": 0, "processing_workers": 0, "waiting_workers": 0}
+
         return {
-            "status": "healthy",
+            "status": "healthy" if db_healthy else "degraded",
             "timestamp": datetime.utcnow().isoformat(),
-            "queue_stats": queue_stats
+            "queue_stats": queue_stats,
+            "database": {
+                "healthy": db_healthy,
+                "error": db_error if not db_healthy else None
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
@@ -522,10 +535,53 @@ async def get_scan_findings(
     scan_id: str,
     offset: int = 0,
     limit: int = 50,
-    user: Dict = Depends(verify_token)
+    severity: Optional[str] = None,
+    rule: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
 ):
-    """Get scan findings from actual scanner output files"""
+    """
+    Get scan findings from database or scanner output files (Week 2).
 
+    Query params:
+    - severity: Filter by severity level (Critical, High, Medium, Low)
+    - rule: Filter by OWASP API rule (API1, API2, etc.)
+    - endpoint: Filter by endpoint pattern
+    - offset: Pagination offset
+    - limit: Maximum results per page
+    """
+
+    # First, try to get findings from database (Week 2)
+    try:
+        db_findings = await scan_history.get_scan_findings(
+            db=db,
+            scan_id=scan_id,
+            severity=severity,
+            rule=rule,
+            endpoint=endpoint
+        )
+
+        if db_findings:
+            # Found in database - use database results
+            all_findings = [f.to_dict() for f in db_findings]
+            total_findings = len(all_findings)
+            paginated_findings = all_findings[offset:offset + limit]
+
+            print(f"✅ Loaded {total_findings} findings from database for scan {scan_id}")
+
+            return {
+                "scan_id": scan_id,
+                "total": total_findings,
+                "offset": offset,
+                "limit": limit,
+                "findings": paginated_findings,
+                "source": "database"
+            }
+    except Exception as e:
+        print(f"⚠️  Database query failed, falling back to file parsing: {e}")
+
+    # Fallback: Parse from files (legacy behavior for backward compatibility)
     if scan_id not in scans:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -537,7 +593,8 @@ async def get_scan_findings(
             "total": 0,
             "offset": offset,
             "limit": limit,
-            "findings": []
+            "findings": [],
+            "source": "memory"
         }
 
     all_findings = []
@@ -547,13 +604,13 @@ async def get_scan_findings(
     if "ventiapi" in scanner_list:
         ventiapi_findings = parse_ventiapi_results(scan_id)
         all_findings.extend(ventiapi_findings)
-        print(f"✅ Loaded {len(ventiapi_findings)} findings from VentiAPI")
+        print(f"✅ Loaded {len(ventiapi_findings)} findings from VentiAPI files")
 
     # Parse ZAP results
     if "zap" in scanner_list:
         zap_findings = parse_zap_results(scan_id, scan_data.get("server_url", ""))
         all_findings.extend(zap_findings)
-        print(f"✅ Loaded {len(zap_findings)} findings from ZAP")
+        print(f"✅ Loaded {len(zap_findings)} findings from ZAP files")
 
     # Apply pagination
     total_findings = len(all_findings)
@@ -564,7 +621,8 @@ async def get_scan_findings(
         "total": total_findings,
         "offset": offset,
         "limit": limit,
-        "findings": paginated_findings
+        "findings": paginated_findings,
+        "source": "files"
     }
 
 def parse_ventiapi_results(scan_id: str) -> List[Dict]:
@@ -676,6 +734,61 @@ def parse_zap_results(scan_id: str, server_url: str) -> List[Dict]:
         import traceback
         print(traceback.format_exc())
         return []
+
+async def persist_scan_to_database(scan_id: str, scan_data: Dict, scanner_list: List[str]):
+    """
+    Persist completed scan results to PostgreSQL database (Week 2).
+
+    Args:
+        scan_id: Unique scan identifier
+        scan_data: In-memory scan data dictionary
+        scanner_list: List of scanner engines used
+    """
+    print(f"📝 Persisting scan {scan_id} to database...")
+
+    # Gather all findings from scanner result files
+    all_findings = []
+
+    # Parse VentiAPI results
+    if "ventiapi" in scanner_list:
+        ventiapi_findings = parse_ventiapi_results(scan_id)
+        all_findings.extend(ventiapi_findings)
+        print(f"  → Collected {len(ventiapi_findings)} VentiAPI findings")
+
+    # Parse ZAP results
+    if "zap" in scanner_list:
+        zap_findings = parse_zap_results(scan_id, scan_data.get("server_url", ""))
+        all_findings.extend(zap_findings)
+        print(f"  → Collected {len(zap_findings)} ZAP findings")
+
+    # Store to database using scan_history module
+    with get_db_context() as db:
+        scanner_config = {
+            "engines": scanner_list,
+            "dangerous_mode": scan_data.get("dangerous_mode", False),
+            "fuzz_auth": scan_data.get("fuzz_auth", False),
+            "max_requests": scan_data.get("max_requests"),
+            "openapi_spec_path": scan_data.get("spec_location"),
+            "openapi_spec_url": scan_data.get("target_url"),
+            "metadata": {
+                "parallel_mode": scan_data.get("parallel_mode", False),
+                "total_chunks": scan_data.get("total_chunks", 1),
+                "rps": scan_data.get("rps", 2.0),
+            }
+        }
+
+        stored_scan = await scan_history.store_scan_result(
+            db=db,
+            scan_id=scan_id,
+            api_base_url=scan_data.get("server_url", ""),
+            findings=all_findings,
+            scanner_config=scanner_config,
+            created_by=None,  # TODO: Get from JWT token in future
+            status="completed"
+        )
+
+        print(f"✅ Persisted scan {scan_id} to database with {len(all_findings)} findings")
+        return stored_scan
 
 @app.get("/api/scan/{scan_id}/report")
 async def get_scan_report(
@@ -891,36 +1004,246 @@ async def get_scan_report_html(
     return Response(content=html_template, media_type="text/html")
 
 @app.get("/api/scans")
-async def list_scans(user: Dict = Depends(verify_token)):
-    """List all scans for the user"""
-    return {"scans": list(scans.values())}
+async def list_scans(
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    api_base_url: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    order_by: str = "created_at",
+    order_direction: str = "desc"
+):
+    """
+    List scans with filtering and pagination (Week 2).
+
+    Query params:
+    - api_base_url: Filter by API base URL
+    - status: Filter by scan status (pending, running, completed, failed)
+    - limit: Maximum number of results (default: 20)
+    - offset: Pagination offset (default: 0)
+    - order_by: Sort field (created_at, completed_at)
+    - order_direction: Sort direction (asc, desc)
+    """
+    try:
+        # Query database for historical scans
+        db_scans, total_count = await scan_history.list_scans(
+            db=db,
+            api_base_url=api_base_url,
+            created_by=user['username'],
+            status=status,
+            limit=limit,
+            offset=offset,
+            order_by=order_by,
+            order_direction=order_direction
+        )
+
+        # Convert to dict format for API response
+        scan_list = [scan.to_dict() for scan in db_scans]
+
+        # Also include in-memory scans (for backwards compatibility with running scans)
+        for scan_id, scan_data in scans.items():
+            # Skip if this scan is already in database results
+            if any(s['scan_id'] == scan_id for s in scan_list):
+                continue
+
+            scan_list.append({
+                "id": None,  # In-memory scans don't have UUID yet
+                "scan_id": scan_id,
+                "api_base_url": scan_data.get("server_url", ""),
+                "created_at": scan_data.get("created_at"),
+                "updated_at": None,
+                "completed_at": None,
+                "created_by": user['username'],
+                "status": scan_data.get("status", "pending"),
+                "total_findings": scan_data.get("findings_count", 0),
+                "critical_count": 0,
+                "high_count": 0,
+                "medium_count": 0,
+                "low_count": 0,
+                "scanner_engines": scan_data.get("scanners", ["ventiapi"]),
+                "dangerous_mode": False,
+                "fuzz_auth": False,
+                "max_requests": None,
+                "openapi_spec_path": scan_data.get("spec_location"),
+                "openapi_spec_url": scan_data.get("target_url"),
+                "metadata": {},
+            })
+
+        return {
+            "scans": scan_list,
+            "total": total_count + len([s for s in scans.values() if s.get("status") in ["pending", "running"]]),
+            "limit": limit,
+            "offset": offset
+        }
+
+    except Exception as e:
+        print(f"Error listing scans: {e}")
+        # Fallback to in-memory scans if database fails
+        return {"scans": list(scans.values()), "total": len(scans), "limit": limit, "offset": offset}
+
+@app.get("/api/scan/{scan_id}/compare/{previous_scan_id}")
+async def compare_scans_endpoint(
+    scan_id: str,
+    previous_scan_id: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    use_cache: bool = True
+):
+    """
+    Compare two scans to detect new, resolved, and regressed findings (Week 2).
+
+    Returns:
+        - new_findings: Findings that appeared in current scan but not in previous
+        - resolved_findings: Findings that were in previous scan but not in current
+        - regressed_findings: Findings with increased severity
+        - unchanged_findings: Findings present in both scans with same severity
+    """
+    try:
+        # Check if comparison is already cached
+        if use_cache:
+            cached = await scan_history.get_cached_comparison(
+                db=db,
+                scan_id=scan_id,
+                previous_scan_id=previous_scan_id
+            )
+            if cached:
+                print(f"✅ Returning cached comparison for {scan_id} vs {previous_scan_id}")
+                return cached
+
+        # Perform comparison
+        comparison = await scan_history.compare_scans(
+            db=db,
+            scan_id=scan_id,
+            previous_scan_id=previous_scan_id,
+            cache_result=True
+        )
+
+        return comparison
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        print(f"Error comparing scans: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to compare scans: {str(e)}")
+
+@app.get("/api/trends/{api_base_url:path}")
+async def get_trends_endpoint(
+    api_base_url: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    days: int = 30
+):
+    """
+    Calculate security trends over time for a specific API (Week 2).
+
+    Query params:
+        - days: Number of days to analyze (default: 30, max: 365)
+
+    Returns:
+        - Daily aggregations of scan results
+        - Average findings, critical, high counts
+        - Trend direction (improving, worsening, stable)
+    """
+    try:
+        # Validate days parameter
+        if days < 1 or days > 365:
+            raise HTTPException(status_code=400, detail="Days must be between 1 and 365")
+
+        trend_data = await scan_history.calculate_trends(
+            db=db,
+            api_base_url=api_base_url,
+            days=days,
+            created_by=user['username']
+        )
+
+        return trend_data
+
+    except Exception as e:
+        print(f"Error calculating trends: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate trends: {str(e)}")
+
+@app.get("/api/latest-scan/{api_base_url:path}")
+async def get_latest_scan_endpoint(
+    api_base_url: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the most recent completed scan for an API (Week 2).
+
+    Returns:
+        - Scan metadata with summary statistics
+        - Useful for dashboards to auto-load latest scan
+    """
+    try:
+        latest_scan = await scan_history.get_latest_scan_for_api(
+            db=db,
+            api_base_url=api_base_url,
+            created_by=user['username']
+        )
+
+        if not latest_scan:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No completed scans found for {api_base_url}"
+            )
+
+        return latest_scan.to_dict()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting latest scan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get latest scan: {str(e)}")
 
 @app.delete("/api/scan/{scan_id}")
-async def delete_scan(scan_id: str, user: Dict = Depends(verify_token)):
-    """Delete a scan and cleanup job data"""
-    
-    if scan_id not in scans:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    
-    # Cancel any running jobs
-    cancelled_jobs = job_queue.cancel_scan_jobs(scan_id)
-    
-    # Remove scan data
-    del scans[scan_id]
-    
-    # Cleanup shared files
+async def delete_scan(
+    scan_id: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Delete a scan and cleanup job data (Week 2: soft delete from database)"""
+
+    # Soft delete from database first (Week 2)
     try:
-        result_dir = SHARED_RESULTS / scan_id
-        if result_dir.exists():
-            import shutil
-            shutil.rmtree(result_dir)
+        deleted = await scan_history.soft_delete_scan(db=db, scan_id=scan_id)
+        if deleted:
+            print(f"✅ Soft deleted scan {scan_id} from database")
     except Exception as e:
-        print(f"Warning: Could not cleanup result directory: {e}")
-    
-    return {
-        "message": "Scan deleted successfully",
-        "cancelled_jobs": cancelled_jobs
-    }
+        print(f"⚠️  Failed to soft delete scan from database: {e}")
+        # Continue with in-memory deletion even if database fails
+
+    # Remove from in-memory dictionary if present
+    if scan_id in scans:
+        # Cancel any running jobs
+        cancelled_jobs = []  # job_queue disabled
+
+        # Remove scan data
+        del scans[scan_id]
+
+        # Cleanup shared files
+        try:
+            result_dir = SHARED_RESULTS / scan_id
+            if result_dir.exists():
+                import shutil
+                shutil.rmtree(result_dir)
+        except Exception as e:
+            print(f"Warning: Could not cleanup result directory: {e}")
+
+        return {
+            "message": "Scan deleted successfully",
+            "cancelled_jobs": cancelled_jobs
+        }
+    else:
+        # Not in memory, but was deleted from database
+        if deleted:
+            return {
+                "message": "Scan deleted successfully from database",
+                "cancelled_jobs": []
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.get("/api/queue/stats")
 async def get_queue_stats(user: Dict = Depends(require_admin)):
@@ -1023,7 +1346,14 @@ async def execute_multi_scan(scan_id: str, user: Dict, dangerous: bool, fuzz_aut
         
         # Store detailed results
         scan_data["scanner_results"] = results
-        
+
+        # Persist scan results to database (Week 2)
+        try:
+            await persist_scan_to_database(scan_id, scan_data, scanner_list)
+        except Exception as db_error:
+            print(f"⚠️  Failed to persist scan {scan_id} to database: {db_error}")
+            # Don't fail the scan if database storage fails (graceful degradation)
+
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
