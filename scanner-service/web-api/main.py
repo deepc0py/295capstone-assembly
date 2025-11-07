@@ -7,7 +7,7 @@ import json
 import uuid
 import os
 import yaml
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -39,6 +39,10 @@ import scan_history
 # Import triage management (Week 3)
 import triage
 from uuid import UUID as UUIDType
+
+# Import RBAC (Week 4)
+import rbac
+from models import User, Organization, OrganizationMembership, OrganizationSettings, ApiKey, AuditLog
 
 # Configuration
 SHARED_RESULTS = Path("/shared/results")
@@ -2050,6 +2054,885 @@ async def monitor_scan_progress(scan_id: str):
             
     except Exception as e:
         print(f"Progress monitoring error for {scan_id}: {e}")
+
+
+# ============================================================================
+# Week 4: RBAC & User Management API Endpoints
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Authentication Endpoints
+# ----------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    """User registration request."""
+    email: str
+    username: str
+    password: str
+    full_name: Optional[str] = None
+    organization_name: str
+    organization_slug: str
+
+class LoginRequest(BaseModel):
+    """User login request."""
+    username: str
+    password: str
+    organization_slug: Optional[str] = None  # If user belongs to multiple orgs
+
+class TokenResponse(BaseModel):
+    """JWT token response."""
+    access_token: str
+    token_type: str = "bearer"
+    user_id: str
+    username: str
+    email: str
+    organization_id: str
+    organization_name: str
+    role: str
+
+@app.post("/api/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register_user(
+    request: RegisterRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Register a new user and create their organization.
+
+    This endpoint:
+    1. Creates a new user account
+    2. Creates a new organization
+    3. Adds user as admin of the organization
+    4. Returns a JWT token for immediate login
+    """
+    # Check if username or email already exists
+    existing_user = db.query(User).filter(
+        (User.username == request.username) | (User.email == request.email)
+    ).first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="Username or email already registered"
+        )
+
+    # Check if organization slug already exists
+    existing_org = db.query(Organization).filter(
+        Organization.slug == request.organization_slug
+    ).first()
+
+    if existing_org:
+        raise HTTPException(
+            status_code=400,
+            detail="Organization slug already taken"
+        )
+
+    # Create user
+    hashed_password = rbac.hash_password(request.password)
+    user = User(
+        email=request.email,
+        username=request.username,
+        hashed_password=hashed_password,
+        full_name=request.full_name,
+        is_active=True,
+        email_verified=False
+    )
+    db.add(user)
+    db.flush()  # Get user.id without committing
+
+    # Create organization
+    organization = Organization(
+        name=request.organization_name,
+        slug=request.organization_slug,
+        tier='free',
+        is_active=True
+    )
+    db.add(organization)
+    db.flush()
+
+    # Create organization settings
+    settings = OrganizationSettings(
+        organization_id=organization.id,
+        max_scans_per_month=10,
+        max_team_members=5,
+        max_api_keys=3
+    )
+    db.add(settings)
+
+    # Add user as admin of organization
+    membership = OrganizationMembership(
+        organization_id=organization.id,
+        user_id=user.id,
+        role='admin',
+        is_active=True,
+        joined_at=datetime.utcnow()
+    )
+    db.add(membership)
+
+    # Log audit event
+    audit_entry = AuditLog(
+        organization_id=organization.id,
+        user_id=user.id,
+        action='user.registered',
+        resource_type='user',
+        resource_id=user.id,
+        details={'email': user.email, 'organization_created': True}
+    )
+    db.add(audit_entry)
+
+    db.commit()
+
+    # Generate access token
+    access_token = rbac.create_access_token(
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        organization_id=organization.id,
+        role='admin',
+        is_superuser=user.is_superuser
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        user_id=str(user.id),
+        username=user.username,
+        email=user.email,
+        organization_id=str(organization.id),
+        organization_name=organization.name,
+        role='admin'
+    )
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def login_user(
+    request: LoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Login user and return JWT token.
+
+    If user belongs to multiple organizations and organization_slug is not provided,
+    returns token for the first organization (alphabetically by slug).
+    """
+    # Find user
+    user = db.query(User).filter(
+        User.username == request.username,
+        User.deleted_at == None
+    ).first()
+
+    if not user or not rbac.verify_password(request.password, user.hashed_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password"
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=401,
+            detail="User account is inactive"
+        )
+
+    # Get user's organizations
+    memberships = db.query(OrganizationMembership).filter(
+        OrganizationMembership.user_id == user.id,
+        OrganizationMembership.is_active == True
+    ).all()
+
+    if not memberships:
+        raise HTTPException(
+            status_code=403,
+            detail="User is not a member of any organization"
+        )
+
+    # Select organization
+    if request.organization_slug:
+        # User specified an organization
+        membership = next(
+            (m for m in memberships if m.organization.slug == request.organization_slug),
+            None
+        )
+        if not membership:
+            raise HTTPException(
+                status_code=403,
+                detail=f"User is not a member of organization '{request.organization_slug}'"
+            )
+    else:
+        # Default to first organization (alphabetically)
+        membership = sorted(memberships, key=lambda m: m.organization.slug)[0]
+
+    organization = membership.organization
+
+    if not organization.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Organization is inactive"
+        )
+
+    # Update last login
+    user.last_login = datetime.utcnow()
+
+    # Log audit event
+    audit_entry = AuditLog(
+        organization_id=organization.id,
+        user_id=user.id,
+        action='user.login',
+        resource_type='user',
+        resource_id=user.id,
+        details={'organization_slug': organization.slug}
+    )
+    db.add(audit_entry)
+
+    db.commit()
+
+    # Generate access token
+    access_token = rbac.create_access_token(
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        organization_id=organization.id,
+        role=membership.role,
+        is_superuser=user.is_superuser
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        user_id=str(user.id),
+        username=user.username,
+        email=user.email,
+        organization_id=str(organization.id),
+        organization_name=organization.name,
+        role=membership.role
+    )
+
+
+@app.get("/api/user/organizations")
+async def get_user_organizations(
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all organizations the current user belongs to.
+
+    Returns list of organizations with user's role in each.
+    """
+    orgs = rbac.get_user_organizations(current_user["user_id"], db)
+
+    return {
+        "organizations": orgs,
+        "count": len(orgs)
+    }
+
+
+class SwitchOrganizationRequest(BaseModel):
+    """Request to switch active organization."""
+    organization_id: str
+
+@app.post("/api/user/switch-organization", response_model=TokenResponse)
+async def switch_organization(
+    request: SwitchOrganizationRequest,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Switch to a different organization.
+
+    Returns a new JWT token with the new organization context.
+    """
+    new_org_id = UUIDType(request.organization_id)
+
+    # Generate new token
+    new_token = rbac.switch_organization(current_user["user_id"], new_org_id, db)
+
+    if not new_token:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this organization"
+        )
+
+    # Get organization and membership info
+    organization = db.query(Organization).filter(Organization.id == new_org_id).first()
+    membership = db.query(OrganizationMembership).filter(
+        OrganizationMembership.user_id == current_user["user_id"],
+        OrganizationMembership.organization_id == new_org_id,
+        OrganizationMembership.is_active == True
+    ).first()
+
+    # Log audit event
+    audit_entry = AuditLog(
+        organization_id=new_org_id,
+        user_id=current_user["user_id"],
+        action='user.switch_organization',
+        resource_type='organization',
+        resource_id=new_org_id,
+        details={'from_organization_id': str(current_user["organization_id"])}
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return TokenResponse(
+        access_token=new_token,
+        user_id=str(current_user["user_id"]),
+        username=current_user["username"],
+        email=current_user.get("email", ""),
+        organization_id=str(organization.id),
+        organization_name=organization.name,
+        role=membership.role
+    )
+
+
+# ----------------------------------------------------------------------------
+# Organization Management Endpoints
+# ----------------------------------------------------------------------------
+
+@app.get("/api/organizations/current")
+async def get_current_organization(
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get current organization details including settings."""
+    org_id = current_user["organization_id"]
+
+    organization = db.query(Organization).filter(Organization.id == org_id).first()
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    settings = db.query(OrganizationSettings).filter(
+        OrganizationSettings.organization_id == org_id
+    ).first()
+
+    # Get membership count
+    member_count = db.query(OrganizationMembership).filter(
+        OrganizationMembership.organization_id == org_id,
+        OrganizationMembership.is_active == True
+    ).count()
+
+    return {
+        **organization.to_dict(),
+        "settings": settings.to_dict() if settings else None,
+        "member_count": member_count,
+        "current_user_role": current_user["role"]
+    }
+
+
+class UpdateOrganizationRequest(BaseModel):
+    """Update organization details."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+@app.put("/api/organizations/current")
+async def update_current_organization(
+    request: UpdateOrganizationRequest,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update current organization details.
+
+    Requires: admin role
+    """
+    # Check admin role
+    if current_user["role"] != "admin" and not current_user.get("is_superuser"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins can update organization details"
+        )
+
+    org_id = current_user["organization_id"]
+    organization = db.query(Organization).filter(Organization.id == org_id).first()
+
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Update fields
+    if request.name is not None:
+        organization.name = request.name
+    if request.description is not None:
+        organization.description = request.description
+
+    # Log audit event
+    await rbac.log_audit_event(
+        db=db,
+        organization_id=org_id,
+        user_id=current_user["user_id"],
+        action='organization.updated',
+        resource_type='organization',
+        resource_id=org_id,
+        details={
+            "name": request.name,
+            "description": request.description
+        }
+    )
+
+    db.commit()
+
+    return organization.to_dict()
+
+
+# ----------------------------------------------------------------------------
+# Team Management Endpoints
+# ----------------------------------------------------------------------------
+
+@app.get("/api/organizations/current/members")
+async def list_organization_members(
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """List all members of the current organization."""
+    org_id = current_user["organization_id"]
+
+    memberships = db.query(OrganizationMembership).filter(
+        OrganizationMembership.organization_id == org_id,
+        OrganizationMembership.is_active == True
+    ).all()
+
+    members = []
+    for membership in memberships:
+        user = membership.user
+        if user and user.deleted_at is None:
+            members.append({
+                **membership.to_dict(),
+                "user": user.to_dict()
+            })
+
+    return {
+        "members": members,
+        "count": len(members)
+    }
+
+
+class InviteUserRequest(BaseModel):
+    """Invite a user to the organization."""
+    email: str
+    role: str = "viewer"  # admin, analyst, viewer
+
+@app.post("/api/organizations/current/invite", status_code=status.HTTP_201_CREATED)
+async def invite_user_to_organization(
+    request: InviteUserRequest,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Invite a user to join the organization.
+
+    Requires: admin role
+
+    If user exists: Add them to organization
+    If user doesn't exist: Create pending invitation (email sent separately)
+    """
+    # Check admin role
+    if current_user["role"] != "admin" and not current_user.get("is_superuser"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins can invite users"
+        )
+
+    # Validate role
+    if request.role not in ["admin", "analyst", "viewer"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid role. Must be: admin, analyst, or viewer"
+        )
+
+    org_id = current_user["organization_id"]
+
+    # Check if user exists
+    user = db.query(User).filter(User.email == request.email).first()
+
+    if user:
+        # Check if already a member
+        existing_membership = db.query(OrganizationMembership).filter(
+            OrganizationMembership.organization_id == org_id,
+            OrganizationMembership.user_id == user.id
+        ).first()
+
+        if existing_membership:
+            if existing_membership.is_active:
+                raise HTTPException(
+                    status_code=400,
+                    detail="User is already a member of this organization"
+                )
+            else:
+                # Reactivate membership
+                existing_membership.is_active = True
+                existing_membership.role = request.role
+                existing_membership.invited_by = current_user["user_id"]
+                existing_membership.invited_at = datetime.utcnow()
+                db.commit()
+
+                return {
+                    "message": "User re-added to organization",
+                    "user_id": str(user.id),
+                    "membership_id": str(existing_membership.id)
+                }
+
+        # Create new membership
+        membership = OrganizationMembership(
+            organization_id=org_id,
+            user_id=user.id,
+            role=request.role,
+            invited_by=current_user["user_id"],
+            is_active=True,
+            joined_at=datetime.utcnow()
+        )
+        db.add(membership)
+
+        # Log audit event
+        await rbac.log_audit_event(
+            db=db,
+            organization_id=org_id,
+            user_id=current_user["user_id"],
+            action='user.invited',
+            resource_type='user',
+            resource_id=user.id,
+            details={
+                "invited_user_email": request.email,
+                "role": request.role
+            }
+        )
+
+        db.commit()
+
+        return {
+            "message": "Existing user added to organization",
+            "user_id": str(user.id),
+            "membership_id": str(membership.id)
+        }
+
+    else:
+        # User doesn't exist - create invitation record
+        # TODO: Implement invitation system (send email, create invitation token, etc.)
+        # For now, return info that invitation would be sent
+        return {
+            "message": "User not found. In production, an invitation email would be sent.",
+            "email": request.email,
+            "role": request.role,
+            "status": "pending_implementation"
+        }
+
+
+class UpdateMemberRoleRequest(BaseModel):
+    """Update a member's role."""
+    role: str  # admin, analyst, viewer
+
+@app.put("/api/organizations/current/members/{user_id}/role")
+async def update_member_role(
+    user_id: str,
+    request: UpdateMemberRoleRequest,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update a member's role in the organization.
+
+    Requires: admin role
+    """
+    # Check admin role
+    if current_user["role"] != "admin" and not current_user.get("is_superuser"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins can update member roles"
+        )
+
+    # Validate role
+    if request.role not in ["admin", "analyst", "viewer"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid role. Must be: admin, analyst, or viewer"
+        )
+
+    org_id = current_user["organization_id"]
+    target_user_id = UUIDType(user_id)
+
+    # Find membership
+    membership = db.query(OrganizationMembership).filter(
+        OrganizationMembership.organization_id == org_id,
+        OrganizationMembership.user_id == target_user_id,
+        OrganizationMembership.is_active == True
+    ).first()
+
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    # Prevent user from changing their own role
+    if target_user_id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot change your own role"
+        )
+
+    # Update role
+    old_role = membership.role
+    membership.role = request.role
+
+    # Log audit event
+    await rbac.log_audit_event(
+        db=db,
+        organization_id=org_id,
+        user_id=current_user["user_id"],
+        action='member.role_changed',
+        resource_type='user',
+        resource_id=target_user_id,
+        details={
+            "old_role": old_role,
+            "new_role": request.role
+        }
+    )
+
+    db.commit()
+
+    return {
+        "message": "Role updated successfully",
+        "membership": membership.to_dict()
+    }
+
+
+@app.delete("/api/organizations/current/members/{user_id}")
+async def remove_member_from_organization(
+    user_id: str,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Remove a member from the organization.
+
+    Requires: admin role
+    """
+    # Check admin role
+    if current_user["role"] != "admin" and not current_user.get("is_superuser"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins can remove members"
+        )
+
+    org_id = current_user["organization_id"]
+    target_user_id = UUIDType(user_id)
+
+    # Find membership
+    membership = db.query(OrganizationMembership).filter(
+        OrganizationMembership.organization_id == org_id,
+        OrganizationMembership.user_id == target_user_id,
+        OrganizationMembership.is_active == True
+    ).first()
+
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    # Prevent user from removing themselves
+    if target_user_id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot remove yourself from the organization"
+        )
+
+    # Deactivate membership
+    membership.is_active = False
+
+    # Log audit event
+    await rbac.log_audit_event(
+        db=db,
+        organization_id=org_id,
+        user_id=current_user["user_id"],
+        action='member.removed',
+        resource_type='user',
+        resource_id=target_user_id,
+        details={
+            "removed_user_role": membership.role
+        }
+    )
+
+    db.commit()
+
+    return {
+        "message": "Member removed successfully",
+        "user_id": user_id
+    }
+
+
+# ----------------------------------------------------------------------------
+# API Key Management Endpoints
+# ----------------------------------------------------------------------------
+
+@app.get("/api/api-keys")
+async def list_api_keys(
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """List all API keys for the current organization."""
+    org_id = current_user["organization_id"]
+
+    api_keys = db.query(ApiKey).filter(
+        ApiKey.organization_id == org_id,
+        ApiKey.is_active == True
+    ).all()
+
+    return {
+        "api_keys": [key.to_dict() for key in api_keys],
+        "count": len(api_keys)
+    }
+
+
+class CreateApiKeyRequest(BaseModel):
+    """Create a new API key."""
+    name: str
+    scopes: List[str] = ["read:scans"]
+    expires_in_days: Optional[int] = None  # None = no expiration
+
+@app.post("/api/api-keys", status_code=status.HTTP_201_CREATED)
+async def create_api_key(
+    request: CreateApiKeyRequest,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new API key for the organization.
+
+    Requires: admin role
+
+    IMPORTANT: The full key is only returned ONCE. Store it securely.
+    """
+    # Check admin role
+    if current_user["role"] != "admin" and not current_user.get("is_superuser"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins can create API keys"
+        )
+
+    org_id = current_user["organization_id"]
+
+    # Validate scopes
+    valid_scopes = [
+        'read:scans', 'write:scans', 'read:findings', 'write:findings',
+        'read:triage', 'write:triage', 'read:reports', 'admin:all'
+    ]
+    for scope in request.scopes:
+        if scope not in valid_scopes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid scope: {scope}. Valid scopes: {', '.join(valid_scopes)}"
+            )
+
+    # Check organization limits
+    settings = db.query(OrganizationSettings).filter(
+        OrganizationSettings.organization_id == org_id
+    ).first()
+
+    if settings:
+        existing_key_count = db.query(ApiKey).filter(
+            ApiKey.organization_id == org_id,
+            ApiKey.is_active == True
+        ).count()
+
+        if existing_key_count >= settings.max_api_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"API key limit reached ({settings.max_api_keys} keys). Upgrade your plan or delete unused keys."
+            )
+
+    # Generate API key
+    full_key, key_hash, key_prefix = rbac.generate_api_key()
+
+    # Calculate expiration
+    expires_at = None
+    if request.expires_in_days:
+        expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
+
+    # Create API key record
+    api_key = ApiKey(
+        organization_id=org_id,
+        created_by=current_user["user_id"],
+        name=request.name,
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        scopes=request.scopes,
+        expires_at=expires_at,
+        is_active=True
+    )
+    db.add(api_key)
+
+    # Log audit event
+    await rbac.log_audit_event(
+        db=db,
+        organization_id=org_id,
+        user_id=current_user["user_id"],
+        action='api_key.created',
+        resource_type='api_key',
+        resource_id=api_key.id,
+        details={
+            "name": request.name,
+            "scopes": request.scopes,
+            "expires_in_days": request.expires_in_days
+        }
+    )
+
+    db.commit()
+
+    return {
+        "message": "API key created successfully. Store this key securely - it will not be shown again!",
+        "api_key": full_key,  # Only shown once!
+        "key_id": str(api_key.id),
+        "key_prefix": key_prefix,
+        "scopes": request.scopes,
+        "expires_at": expires_at.isoformat() if expires_at else None
+    }
+
+
+@app.delete("/api/api-keys/{key_id}")
+async def delete_api_key(
+    key_id: str,
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete (deactivate) an API key.
+
+    Requires: admin role
+    """
+    # Check admin role
+    if current_user["role"] != "admin" and not current_user.get("is_superuser"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization admins can delete API keys"
+        )
+
+    org_id = current_user["organization_id"]
+    api_key_id = UUIDType(key_id)
+
+    # Find API key
+    api_key = db.query(ApiKey).filter(
+        ApiKey.id == api_key_id,
+        ApiKey.organization_id == org_id
+    ).first()
+
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    # Deactivate
+    api_key.is_active = False
+
+    # Log audit event
+    await rbac.log_audit_event(
+        db=db,
+        organization_id=org_id,
+        user_id=current_user["user_id"],
+        action='api_key.deleted',
+        resource_type='api_key',
+        resource_id=api_key_id,
+        details={
+            "name": api_key.name,
+            "key_prefix": api_key.key_prefix
+        }
+    )
+
+    db.commit()
+
+    return {
+        "message": "API key deleted successfully",
+        "key_id": key_id
+    }
+
+
+# ============================================================================
+# End of RBAC Endpoints
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
