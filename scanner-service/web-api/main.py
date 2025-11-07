@@ -1298,7 +1298,7 @@ async def cleanup_old_jobs(user: Dict = Depends(require_admin)):
 @app.post("/api/finding/{finding_id}/triage")
 async def create_triage_endpoint(
     finding_id: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     status: str = "new",
     assigned_to: Optional[str] = None,
@@ -1319,12 +1319,14 @@ async def create_triage_endpoint(
     try:
         finding_uuid = UUIDType(finding_id)
 
+        # Week 4: RBAC - Pass organization context
         triage_record = await triage.create_triage(
             db=db,
             finding_id=finding_uuid,
             status=status,
             assigned_to=assigned_to,
-            assigned_by=user['username'] if assigned_to else None,
+            assigned_by=current_user['username'] if assigned_to else None,
+            organization_id=current_user['organization_id'],  # Week 4: RBAC
             auto_sla=auto_sla,
             sla_days=sla_days,
             tags=tags or []
@@ -1343,7 +1345,7 @@ async def create_triage_endpoint(
 async def update_status_endpoint(
     finding_id: str,
     new_status: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     change_reason: Optional[str] = None,
     validation_notes: Optional[str] = None
@@ -1363,7 +1365,7 @@ async def update_status_endpoint(
             db=db,
             finding_id=finding_uuid,
             new_status=new_status,
-            changed_by=user['username'],
+            changed_by=current_user['username'],  # Week 4: RBAC
             change_reason=change_reason,
             validation_notes=validation_notes
         )
@@ -1381,7 +1383,7 @@ async def update_status_endpoint(
 async def assign_finding_endpoint(
     finding_id: str,
     assigned_to: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """
@@ -1397,7 +1399,7 @@ async def assign_finding_endpoint(
             db=db,
             finding_id=finding_uuid,
             assigned_to=assigned_to,
-            assigned_by=user['username']
+            assigned_by=current_user['username']  # Week 4: RBAC
         )
 
         return triage_record.to_dict()
@@ -1413,7 +1415,7 @@ async def assign_finding_endpoint(
 async def mark_risk_accepted_endpoint(
     finding_id: str,
     reason: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """
@@ -1428,7 +1430,7 @@ async def mark_risk_accepted_endpoint(
         triage_record = await triage.mark_risk_accepted(
             db=db,
             finding_id=finding_uuid,
-            accepted_by=user['username'],
+            accepted_by=current_user['username'],  # Week 4: RBAC
             reason=reason
         )
 
@@ -1445,7 +1447,7 @@ async def mark_risk_accepted_endpoint(
 async def add_comment_endpoint(
     finding_id: str,
     comment: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     comment_type: str = "note",
     is_internal: bool = False,
@@ -1463,14 +1465,17 @@ async def add_comment_endpoint(
     try:
         finding_uuid = UUIDType(finding_id)
 
+        # Week 4: RBAC - Pass organization and author context
         comment_record = await triage.add_comment(
             db=db,
             finding_id=finding_uuid,
-            author=user['username'],
+            author=current_user['username'],
             comment=comment,
             comment_type=comment_type,
             is_internal=is_internal,
-            mentions=mentions or []
+            mentions=mentions or [],
+            organization_id=current_user['organization_id'],  # Week 4: RBAC
+            author_id=current_user['user_id']  # Week 4: RBAC
         )
 
         return comment_record.to_dict()
@@ -1485,7 +1490,7 @@ async def add_comment_endpoint(
 @app.get("/api/finding/{finding_id}/comments")
 async def get_comments_endpoint(
     finding_id: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     include_internal: bool = True
 ):
@@ -1520,7 +1525,7 @@ async def get_comments_endpoint(
 @app.get("/api/finding/{finding_id}/triage")
 async def get_triage_endpoint(
     finding_id: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """
@@ -1550,7 +1555,7 @@ async def get_triage_endpoint(
 
 @app.get("/api/triaged-findings")
 async def list_triaged_findings_endpoint(
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     scan_id: Optional[str] = None,
     status: Optional[str] = None,
@@ -1573,8 +1578,10 @@ async def list_triaged_findings_endpoint(
     try:
         scan_uuid = UUIDType(scan_id) if scan_id else None
 
+        # Week 4: RBAC - Filter by organization
         findings, total_count = await triage.list_triaged_findings(
             db=db,
+            organization_id=current_user['organization_id'],  # Week 4: RBAC
             scan_id=scan_uuid,
             status=status,
             assigned_to=assigned_to,
@@ -1599,7 +1606,7 @@ async def list_triaged_findings_endpoint(
 
 @app.get("/api/overdue-findings")
 async def get_overdue_findings_endpoint(
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     assigned_to: Optional[str] = None
 ):
@@ -1610,8 +1617,10 @@ async def get_overdue_findings_endpoint(
         - assigned_to: Filter by assignee (optional)
     """
     try:
+        # Week 4: RBAC - Filter by organization
         findings = await triage.get_overdue_findings(
             db=db,
+            organization_id=current_user['organization_id'],  # Week 4: RBAC
             assigned_to=assigned_to
         )
 
@@ -1627,7 +1636,7 @@ async def get_overdue_findings_endpoint(
 
 @app.get("/api/triage-metrics")
 async def get_triage_metrics_endpoint(
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     scan_id: Optional[str] = None,
     assigned_to: Optional[str] = None
@@ -1642,8 +1651,10 @@ async def get_triage_metrics_endpoint(
     try:
         scan_uuid = UUIDType(scan_id) if scan_id else None
 
+        # Week 4: RBAC - Filter by organization
         metrics = await triage.get_triage_metrics(
             db=db,
+            organization_id=current_user['organization_id'],  # Week 4: RBAC
             scan_id=scan_uuid,
             assigned_to=assigned_to
         )
@@ -1660,7 +1671,7 @@ async def get_triage_metrics_endpoint(
 @app.get("/api/finding/{finding_id}/status-history")
 async def get_status_history_endpoint(
     finding_id: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """

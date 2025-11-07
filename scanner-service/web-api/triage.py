@@ -36,6 +36,7 @@ async def create_triage(
     status: str = "new",
     assigned_to: Optional[str] = None,
     assigned_by: Optional[str] = None,
+    organization_id: Optional[UUID] = None,
     auto_sla: bool = True,
     sla_days: Optional[int] = None,
     tags: Optional[List[str]] = None,
@@ -50,6 +51,7 @@ async def create_triage(
         status: Initial status (default: 'new')
         assigned_to: User to assign finding to
         assigned_by: User who made the assignment
+        organization_id: Organization UUID (Week 4: RBAC)
         auto_sla: Automatically calculate SLA based on severity
         sla_days: Custom SLA in days (overrides auto_sla)
         tags: Custom tags for filtering
@@ -62,10 +64,14 @@ async def create_triage(
         IntegrityError: If triage already exists for this finding
     """
     try:
-        # Get finding to determine SLA
+        # Get finding to determine SLA and organization
         finding = db.query(Finding).filter(Finding.id == finding_id).first()
         if not finding:
             raise ValueError(f"Finding {finding_id} not found")
+
+        # Week 4: RBAC - Use finding's organization if not explicitly provided
+        if organization_id is None:
+            organization_id = finding.organization_id
 
         # Calculate SLA deadline
         sla_deadline = None
@@ -86,9 +92,10 @@ async def create_triage(
             calculated_sla_days = severity_sla_map.get(finding.severity, 30)
             sla_deadline = datetime.utcnow() + timedelta(days=calculated_sla_days)
 
-        # Create triage record
+        # Create triage record (Week 4: RBAC - include organization_id)
         triage = FindingTriage(
             finding_id=finding_id,
+            organization_id=organization_id,  # Week 4: RBAC
             status=status,
             assigned_to=assigned_to,
             assigned_at=datetime.utcnow() if assigned_to else None,
@@ -281,7 +288,9 @@ async def add_comment(
     comment: str,
     comment_type: str = "note",
     is_internal: bool = False,
-    mentions: Optional[List[str]] = None
+    mentions: Optional[List[str]] = None,
+    organization_id: Optional[UUID] = None,
+    author_id: Optional[UUID] = None
 ) -> FindingComment:
     """
     Add a comment to a finding.
@@ -289,19 +298,29 @@ async def add_comment(
     Args:
         db: Database session
         finding_id: UUID of finding
-        author: User adding the comment
+        author: User adding the comment (username or identifier)
         comment: Comment text
         comment_type: Type of comment (note, analysis, remediation, escalation, resolution)
         is_internal: Whether comment is internal-only
         mentions: List of @mentioned users
+        organization_id: Organization UUID (Week 4: RBAC)
+        author_id: User UUID of author (Week 4: RBAC)
 
     Returns:
         FindingComment: Created comment record
     """
     try:
+        # Week 4: RBAC - Inherit organization from finding if not provided
+        if organization_id is None:
+            finding = db.query(Finding).filter(Finding.id == finding_id).first()
+            if finding:
+                organization_id = finding.organization_id
+
         comment_record = FindingComment(
             finding_id=finding_id,
+            organization_id=organization_id,  # Week 4: RBAC
             author=author,
+            author_id=author_id,  # Week 4: RBAC
             comment=comment,
             comment_type=comment_type,
             is_internal=is_internal,
@@ -386,6 +405,7 @@ async def get_triage(
 
 async def list_triaged_findings(
     db: Session,
+    organization_id: Optional[UUID] = None,
     scan_id: Optional[UUID] = None,
     status: Optional[str] = None,
     assigned_to: Optional[str] = None,
@@ -398,6 +418,7 @@ async def list_triaged_findings(
 
     Args:
         db: Database session
+        organization_id: Filter by organization (Week 4: RBAC)
         scan_id: Filter by scan ID
         status: Filter by triage status
         assigned_to: Filter by assignee
@@ -414,6 +435,10 @@ async def list_triaged_findings(
             FindingTriage,
             Finding.id == FindingTriage.finding_id
         )
+
+        # Week 4: RBAC - Filter by organization
+        if organization_id:
+            query = query.filter(FindingTriage.organization_id == organization_id)
 
         # Apply filters
         if scan_id:
@@ -458,6 +483,7 @@ async def list_triaged_findings(
 
 async def get_overdue_findings(
     db: Session,
+    organization_id: Optional[UUID] = None,
     assigned_to: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
@@ -465,6 +491,7 @@ async def get_overdue_findings(
 
     Args:
         db: Database session
+        organization_id: Filter by organization (Week 4: RBAC)
         assigned_to: Filter by assignee (optional)
 
     Returns:
@@ -480,6 +507,10 @@ async def get_overdue_findings(
                 FindingTriage.status.notin_(['resolved', 'risk_accepted', 'false_positive', 'wont_fix'])
             )
         )
+
+        # Week 4: RBAC - Filter by organization
+        if organization_id:
+            query = query.filter(FindingTriage.organization_id == organization_id)
 
         if assigned_to:
             query = query.filter(FindingTriage.assigned_to == assigned_to)
@@ -508,6 +539,7 @@ async def get_overdue_findings(
 
 async def get_triage_metrics(
     db: Session,
+    organization_id: Optional[UUID] = None,
     scan_id: Optional[UUID] = None,
     assigned_to: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -516,6 +548,7 @@ async def get_triage_metrics(
 
     Args:
         db: Database session
+        organization_id: Filter by organization (Week 4: RBAC)
         scan_id: Filter by scan ID (optional)
         assigned_to: Filter by assignee (optional)
 
@@ -525,6 +558,10 @@ async def get_triage_metrics(
     try:
         # Build base query
         query = db.query(FindingTriage)
+
+        # Week 4: RBAC - Filter by organization
+        if organization_id:
+            query = query.filter(FindingTriage.organization_id == organization_id)
 
         if scan_id:
             query = query.join(Finding).filter(Finding.scan_id == scan_id)
