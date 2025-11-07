@@ -17,11 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 
-# Import our security module
+# Import our security module (Week 4: RBAC - removed verify_token, require_admin, create_access_token)
 from security import (
-    verify_token, require_admin, user_db, create_access_token,
-    validate_file_upload, validate_url, sanitize_path, 
-    get_secure_docker_command, SecurityHeaders, limiter, 
+    user_db,  # Keep for backward compatibility
+    validate_file_upload, validate_url, sanitize_path,
+    get_secure_docker_command, SecurityHeaders, limiter,
     RateLimits, validate_scan_params, log_security_event, SecurityConfig
 )
 
@@ -181,36 +181,7 @@ async def health_check():
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
 
-@app.post("/api/auth/login")
-@limiter.limit(RateLimits.LOGIN)
-async def login(request: Request, login_req: LoginRequest):
-    """Authenticate user and return JWT token"""
-    
-    log_security_event("login_attempt", login_req.username, {
-        "ip": request.client.host,
-        "user_agent": request.headers.get("user-agent", "unknown")
-    })
-    
-    # Verify user credentials
-    user = user_db.verify_user(login_req.username, login_req.password)
-    if not user:
-        log_security_event("login_failed", login_req.username, {
-            "reason": "invalid_credentials",
-            "ip": request.client.host
-        })
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-    
-    access_token = create_access_token(user['username'], user.get('is_admin', False))
-    
-    log_security_event("login_success", login_req.username, {
-        "ip": request.client.host,
-        "is_admin": user.get('is_admin', False)
-    })
-    
-    return {"access_token": access_token, "token_type": "bearer"}
+# Week 4: RBAC - Legacy login endpoint removed, replaced by RBAC login at line ~2253
 
 @app.post("/api/scan/start", response_model=ScanResponse)
 @limiter.limit(RateLimits.SCAN_START)
@@ -1277,8 +1248,10 @@ async def delete_scan(
             raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.get("/api/queue/stats")
-async def get_queue_stats(user: Dict = Depends(require_admin)):
-    """Get queue statistics (admin only)"""
+async def get_queue_stats(
+    current_user: Dict = Depends(rbac.get_superuser)  # Week 4: RBAC - superuser only
+):
+    """Get queue statistics (superuser only)"""
     return {"queue_length": 0, "active_workers": 0, "processing_workers": 0, "waiting_workers": 0}
 
 @app.get("/api/scanners")
@@ -1294,8 +1267,10 @@ async def get_available_scanners():
     }
 
 @app.post("/api/queue/cleanup")
-async def cleanup_old_jobs(user: Dict = Depends(require_admin)):
-    """Cleanup old job data (admin only)"""
+async def cleanup_old_jobs(
+    current_user: Dict = Depends(rbac.get_superuser)  # Week 4: RBAC - superuser only
+):
+    """Cleanup old job data (superuser only)"""
     return {"message": "Job queue disabled - using direct execution mode"}
 
 # ============================================================================
