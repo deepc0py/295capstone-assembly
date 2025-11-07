@@ -36,6 +36,10 @@ from database import get_db, get_db_context, check_database_health
 from sqlalchemy.orm import Session
 import scan_history
 
+# Import triage management (Week 3)
+import triage
+from uuid import UUID as UUIDType
+
 # Configuration
 SHARED_RESULTS = Path("/shared/results")
 SHARED_SPECS = Path("/shared/specs")
@@ -1266,6 +1270,406 @@ async def get_available_scanners():
 async def cleanup_old_jobs(user: Dict = Depends(require_admin)):
     """Cleanup old job data (admin only)"""
     return {"message": "Job queue disabled - using direct execution mode"}
+
+# ============================================================================
+# Triage Endpoints (Week 3)
+# ============================================================================
+
+@app.post("/api/finding/{finding_id}/triage")
+async def create_triage_endpoint(
+    finding_id: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    status: str = "new",
+    assigned_to: Optional[str] = None,
+    auto_sla: bool = True,
+    sla_days: Optional[int] = None,
+    tags: Optional[List[str]] = None
+):
+    """
+    Create a triage record for a finding (Week 3).
+
+    Body params:
+        - status: Initial status (default: 'new')
+        - assigned_to: User to assign to (optional)
+        - auto_sla: Auto-calculate SLA from severity (default: true)
+        - sla_days: Custom SLA in days (overrides auto_sla)
+        - tags: Custom tags for filtering
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        triage_record = await triage.create_triage(
+            db=db,
+            finding_id=finding_uuid,
+            status=status,
+            assigned_to=assigned_to,
+            assigned_by=user['username'] if assigned_to else None,
+            auto_sla=auto_sla,
+            sla_days=sla_days,
+            tags=tags or []
+        )
+
+        return triage_record.to_dict()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to create triage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create triage: {str(e)}")
+
+
+@app.put("/api/finding/{finding_id}/status")
+async def update_status_endpoint(
+    finding_id: str,
+    new_status: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    change_reason: Optional[str] = None,
+    validation_notes: Optional[str] = None
+):
+    """
+    Update the triage status of a finding (Week 3).
+
+    Body params:
+        - new_status: New status value (required)
+        - change_reason: Reason for status change (optional)
+        - validation_notes: Notes if validating (optional)
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        triage_record = await triage.update_triage_status(
+            db=db,
+            finding_id=finding_uuid,
+            new_status=new_status,
+            changed_by=user['username'],
+            change_reason=change_reason,
+            validation_notes=validation_notes
+        )
+
+        return triage_record.to_dict()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
+
+
+@app.put("/api/finding/{finding_id}/assign")
+async def assign_finding_endpoint(
+    finding_id: str,
+    assigned_to: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Assign a finding to a user (Week 3).
+
+    Body params:
+        - assigned_to: User to assign to (required)
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        triage_record = await triage.assign_finding(
+            db=db,
+            finding_id=finding_uuid,
+            assigned_to=assigned_to,
+            assigned_by=user['username']
+        )
+
+        return triage_record.to_dict()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to assign finding: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to assign finding: {str(e)}")
+
+
+@app.post("/api/finding/{finding_id}/risk-accept")
+async def mark_risk_accepted_endpoint(
+    finding_id: str,
+    reason: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Mark a finding as risk accepted (Week 3).
+
+    Body params:
+        - reason: Reason for risk acceptance (required)
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        triage_record = await triage.mark_risk_accepted(
+            db=db,
+            finding_id=finding_uuid,
+            accepted_by=user['username'],
+            reason=reason
+        )
+
+        return triage_record.to_dict()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to mark risk accepted: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to mark risk accepted: {str(e)}")
+
+
+@app.post("/api/finding/{finding_id}/comment")
+async def add_comment_endpoint(
+    finding_id: str,
+    comment: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    comment_type: str = "note",
+    is_internal: bool = False,
+    mentions: Optional[List[str]] = None
+):
+    """
+    Add a comment to a finding (Week 3).
+
+    Body params:
+        - comment: Comment text (required)
+        - comment_type: Type (note, analysis, remediation, escalation, resolution)
+        - is_internal: Internal-only comment (default: false)
+        - mentions: List of @mentioned users
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        comment_record = await triage.add_comment(
+            db=db,
+            finding_id=finding_uuid,
+            author=user['username'],
+            comment=comment,
+            comment_type=comment_type,
+            is_internal=is_internal,
+            mentions=mentions or []
+        )
+
+        return comment_record.to_dict()
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to add comment: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add comment: {str(e)}")
+
+
+@app.get("/api/finding/{finding_id}/comments")
+async def get_comments_endpoint(
+    finding_id: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    include_internal: bool = True
+):
+    """
+    Get all comments for a finding (Week 3).
+
+    Query params:
+        - include_internal: Include internal comments (default: true)
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        comments = await triage.get_comments(
+            db=db,
+            finding_id=finding_uuid,
+            include_internal=include_internal
+        )
+
+        return {
+            "finding_id": finding_id,
+            "comments": [c.to_dict() for c in comments],
+            "total": len(comments)
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get comments: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get comments: {str(e)}")
+
+
+@app.get("/api/finding/{finding_id}/triage")
+async def get_triage_endpoint(
+    finding_id: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Get triage info for a finding (Week 3).
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        triage_record = await triage.get_triage(
+            db=db,
+            finding_id=finding_uuid
+        )
+
+        if not triage_record:
+            raise HTTPException(status_code=404, detail="Triage record not found")
+
+        return triage_record.to_dict()
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get triage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get triage: {str(e)}")
+
+
+@app.get("/api/triaged-findings")
+async def list_triaged_findings_endpoint(
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    scan_id: Optional[str] = None,
+    status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    overdue_only: bool = False,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    List triaged findings with filtering (Week 3).
+
+    Query params:
+        - scan_id: Filter by scan ID
+        - status: Filter by triage status
+        - assigned_to: Filter by assignee
+        - overdue_only: Show only overdue findings
+        - limit: Max results (default: 50)
+        - offset: Pagination offset
+    """
+    try:
+        scan_uuid = UUIDType(scan_id) if scan_id else None
+
+        findings, total_count = await triage.list_triaged_findings(
+            db=db,
+            scan_id=scan_uuid,
+            status=status,
+            assigned_to=assigned_to,
+            overdue_only=overdue_only,
+            limit=limit,
+            offset=offset
+        )
+
+        return {
+            "findings": findings,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to list triaged findings: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list triaged findings: {str(e)}")
+
+
+@app.get("/api/overdue-findings")
+async def get_overdue_findings_endpoint(
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    assigned_to: Optional[str] = None
+):
+    """
+    Get all overdue findings (Week 3).
+
+    Query params:
+        - assigned_to: Filter by assignee (optional)
+    """
+    try:
+        findings = await triage.get_overdue_findings(
+            db=db,
+            assigned_to=assigned_to
+        )
+
+        return {
+            "findings": findings,
+            "total": len(findings)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get overdue findings: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get overdue findings: {str(e)}")
+
+
+@app.get("/api/triage-metrics")
+async def get_triage_metrics_endpoint(
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db),
+    scan_id: Optional[str] = None,
+    assigned_to: Optional[str] = None
+):
+    """
+    Get triage metrics and statistics (Week 3).
+
+    Query params:
+        - scan_id: Filter by scan ID (optional)
+        - assigned_to: Filter by assignee (optional)
+    """
+    try:
+        scan_uuid = UUIDType(scan_id) if scan_id else None
+
+        metrics = await triage.get_triage_metrics(
+            db=db,
+            scan_id=scan_uuid,
+            assigned_to=assigned_to
+        )
+
+        return metrics
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get triage metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get triage metrics: {str(e)}")
+
+
+@app.get("/api/finding/{finding_id}/status-history")
+async def get_status_history_endpoint(
+    finding_id: str,
+    user: Dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Get status change history for a finding (Week 3).
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+
+        history = await triage.get_status_history(
+            db=db,
+            finding_id=finding_uuid
+        )
+
+        return {
+            "finding_id": finding_id,
+            "history": [h.to_dict() for h in history],
+            "total": len(history)
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get status history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get status history: {str(e)}")
+
+
+# ============================================================================
+# End Triage Endpoints
+# ============================================================================
 
 async def execute_multi_scan(scan_id: str, user: Dict, dangerous: bool, fuzz_auth: bool, rps: float, max_requests: int):
     """Execute scan using multiple scanner engines in parallel"""
