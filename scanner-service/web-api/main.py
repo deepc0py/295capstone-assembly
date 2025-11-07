@@ -513,12 +513,15 @@ async def monitor_scan_jobs(scan_id: str):
             await asyncio.sleep(5)
 
 @app.get("/api/scan/{scan_id}/status", response_model=ScanStatus)
-async def get_scan_status(scan_id: str, user: Dict = Depends(verify_token)):
+async def get_scan_status(
+    scan_id: str,
+    current_user: Dict = Depends(rbac.get_current_active_user)  # Week 4: RBAC
+):
     """Get current scan status with job queue information"""
-    
+
     if scan_id not in scans:
         raise HTTPException(status_code=404, detail="Scan not found")
-    
+
     scan_data = scans[scan_id]
     
     # Get chunk statuses directly from scan data
@@ -549,7 +552,7 @@ async def get_scan_findings(
     severity: Optional[str] = None,
     rule: Optional[str] = None,
     endpoint: Optional[str] = None,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """
@@ -813,17 +816,18 @@ async def persist_scan_to_database(
 @app.get("/api/scan/{scan_id}/report")
 async def get_scan_report(
     scan_id: str,
-    user: Dict = Depends(verify_token)
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
+    db: Session = Depends(get_db)
 ):
     """Get comprehensive scan report with scanner attribution"""
-    
+
     if scan_id not in scans:
         raise HTTPException(status_code=404, detail="Scan not found")
-    
+
     scan_data = scans[scan_id]
-    
-    # Get all findings with scanner attribution
-    findings_response = await get_scan_findings(scan_id, 0, 1000, user)
+
+    # Get all findings with scanner attribution (Week 4: RBAC - pass current_user)
+    findings_response = await get_scan_findings(scan_id, 0, 1000, None, None, None, current_user, db)
     findings = findings_response["findings"]
     
     # Organize findings by scanner
@@ -910,12 +914,13 @@ async def get_scan_report(
 @app.get("/api/scan/{scan_id}/report/html")
 async def get_scan_report_html(
     scan_id: str,
-    user: Dict = Depends(verify_token)
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
+    db: Session = Depends(get_db)
 ):
     """Get HTML formatted scan report for download"""
-    
-    # Get the JSON report first
-    report = await get_scan_report(scan_id, user)
+
+    # Get the JSON report first (Week 4: RBAC - pass current_user and db)
+    report = await get_scan_report(scan_id, current_user, db)
     
     # Generate HTML report
     html_template = f"""
@@ -1110,7 +1115,7 @@ async def list_scans(
 async def compare_scans_endpoint(
     scan_id: str,
     previous_scan_id: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     use_cache: bool = True
 ):
@@ -1154,7 +1159,7 @@ async def compare_scans_endpoint(
 @app.get("/api/trends/{api_base_url:path}")
 async def get_trends_endpoint(
     api_base_url: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db),
     days: int = 30
 ):
@@ -1174,11 +1179,12 @@ async def get_trends_endpoint(
         if days < 1 or days > 365:
             raise HTTPException(status_code=400, detail="Days must be between 1 and 365")
 
+        # Week 4: RBAC - Filter by organization
         trend_data = await scan_history.calculate_trends(
             db=db,
             api_base_url=api_base_url,
             days=days,
-            created_by=user['username']
+            organization_id=current_user['organization_id']  # Week 4: RBAC
         )
 
         return trend_data
@@ -1190,7 +1196,7 @@ async def get_trends_endpoint(
 @app.get("/api/latest-scan/{api_base_url:path}")
 async def get_latest_scan_endpoint(
     api_base_url: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """
@@ -1201,10 +1207,11 @@ async def get_latest_scan_endpoint(
         - Useful for dashboards to auto-load latest scan
     """
     try:
+        # Week 4: RBAC - Filter by organization
         latest_scan = await scan_history.get_latest_scan_for_api(
             db=db,
             api_base_url=api_base_url,
-            created_by=user['username']
+            organization_id=current_user['organization_id']  # Week 4: RBAC
         )
 
         if not latest_scan:
@@ -1224,7 +1231,7 @@ async def get_latest_scan_endpoint(
 @app.delete("/api/scan/{scan_id}")
 async def delete_scan(
     scan_id: str,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
     db: Session = Depends(get_db)
 ):
     """Delete a scan and cleanup job data (Week 2: soft delete from database)"""

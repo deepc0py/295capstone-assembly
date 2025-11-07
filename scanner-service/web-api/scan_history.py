@@ -492,7 +492,8 @@ async def calculate_trends(
     db: Session,
     api_base_url: str,
     days: int = 30,
-    created_by: Optional[str] = None
+    organization_id: Optional[UUID] = None,
+    created_by: Optional[UUID] = None
 ) -> Dict[str, Any]:
     """
     Calculate security trends over time for a specific API.
@@ -501,7 +502,8 @@ async def calculate_trends(
         db: Database session
         api_base_url: API base URL to analyze
         days: Number of days to analyze (default: 30)
-        created_by: Filter by user who created scans
+        organization_id: Filter by organization (Week 4: RBAC)
+        created_by: Filter by user UUID who created scans (Week 4: RBAC - now UUID)
 
     Returns:
         Dict: Trend data with daily/weekly aggregations
@@ -518,6 +520,10 @@ async def calculate_trends(
                 Scan.deleted_at.is_(None)
             )
         )
+
+        # Week 4: RBAC - Filter by organization
+        if organization_id:
+            query = query.filter(Scan.organization_id == organization_id)
 
         if created_by:
             query = query.filter(Scan.created_by == created_by)
@@ -602,7 +608,8 @@ async def calculate_trends(
 async def get_latest_scan_for_api(
     db: Session,
     api_base_url: str,
-    created_by: Optional[str] = None
+    organization_id: Optional[UUID] = None,
+    created_by: Optional[UUID] = None
 ) -> Optional[Scan]:
     """
     Get the most recent completed scan for an API.
@@ -610,7 +617,8 @@ async def get_latest_scan_for_api(
     Args:
         db: Database session
         api_base_url: API base URL
-        created_by: Filter by user who created the scan
+        organization_id: Filter by organization (Week 4: RBAC)
+        created_by: Filter by user UUID who created the scan (Week 4: RBAC - now UUID)
 
     Returns:
         Scan: The most recent scan, or None if not found
@@ -623,6 +631,10 @@ async def get_latest_scan_for_api(
                 Scan.deleted_at.is_(None)
             )
         )
+
+        # Week 4: RBAC - Filter by organization
+        if organization_id:
+            query = query.filter(Scan.organization_id == organization_id)
 
         if created_by:
             query = query.filter(Scan.created_by == created_by)
