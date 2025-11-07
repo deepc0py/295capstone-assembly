@@ -513,3 +513,371 @@ class FindingStatusHistory(Base):
             "sla_deadline": self.sla_deadline.isoformat() if self.sla_deadline else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+# ============================================================================
+# Week 4: RBAC & Organization Models
+# ============================================================================
+
+class Organization(Base):
+    """
+    Multi-tenant organization for RBAC isolation.
+
+    Each organization has its own scans, findings, and team members.
+    Week 4: RBAC & Organization Isolation
+    """
+    __tablename__ = "organizations"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    name = Column(String, nullable=False)
+    slug = Column(String, unique=True, nullable=False, index=True)
+    description = Column(Text, nullable=True)
+
+    # Tier and status
+    tier = Column(String, nullable=False, default='free')
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    memberships = relationship("OrganizationMembership", back_populates="organization", cascade="all, delete-orphan")
+    settings = relationship("OrganizationSettings", back_populates="organization", uselist=False, cascade="all, delete-orphan")
+    scans = relationship("Scan", back_populates="organization", cascade="all, delete-orphan")
+    api_keys = relationship("ApiKey", back_populates="organization", cascade="all, delete-orphan")
+    audit_logs = relationship("AuditLog", back_populates="organization", cascade="all, delete-orphan")
+
+    # Constraints
+    __table_args__ = (
+        CheckConstraint("tier IN ('free', 'starter', 'professional', 'enterprise')", name='valid_tier'),
+        Index('idx_organizations_slug', 'slug'),
+        Index('idx_organizations_is_active', 'is_active'),
+    )
+
+    def __repr__(self):
+        return f"<Organization(slug={self.slug}, tier={self.tier})>"
+
+    def to_dict(self) -> dict:
+        """Convert organization to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "name": self.name,
+            "slug": self.slug,
+            "description": self.description,
+            "tier": self.tier,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class User(Base):
+    """
+    User account with authentication credentials.
+
+    Can belong to multiple organizations with different roles.
+    Week 4: RBAC & Organization Isolation
+    """
+    __tablename__ = "users"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    email = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
+
+    # Flags
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    is_superuser = Column(Boolean, nullable=False, default=False)
+    email_verified = Column(Boolean, nullable=False, default=False)
+
+    # Timestamps
+    last_login = Column(TIMESTAMP(timezone=True), nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(TIMESTAMP(timezone=True), nullable=True)  # Soft delete
+
+    # Relationships
+    memberships = relationship("OrganizationMembership", back_populates="user", cascade="all, delete-orphan")
+    created_api_keys = relationship("ApiKey", back_populates="created_by_user", cascade="all, delete-orphan")
+    audit_logs = relationship("AuditLog", back_populates="user", cascade="all, delete-orphan")
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_users_email', 'email'),
+        Index('idx_users_username', 'username'),
+        Index('idx_users_is_active', 'is_active'),
+    )
+
+    def __repr__(self):
+        return f"<User(username={self.username}, email={self.email})>"
+
+    def to_dict(self, include_sensitive: bool = False) -> dict:
+        """Convert user to dictionary for API responses."""
+        data = {
+            "id": str(self.id),
+            "email": self.email,
+            "username": self.username,
+            "full_name": self.full_name,
+            "is_active": self.is_active,
+            "is_superuser": self.is_superuser,
+            "email_verified": self.email_verified,
+            "last_login": self.last_login.isoformat() if self.last_login else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+        if include_sensitive:
+            data["deleted_at"] = self.deleted_at.isoformat() if self.deleted_at else None
+        return data
+
+
+class OrganizationMembership(Base):
+    """
+    Junction table: Users <-> Organizations with roles.
+
+    Defines user's role within a specific organization.
+    Week 4: RBAC & Organization Isolation
+    """
+    __tablename__ = "organization_memberships"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Role and status
+    role = Column(String, nullable=False, default='viewer', index=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    # Invitation tracking
+    invited_by = Column(PG_UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    invited_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    joined_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    organization = relationship("Organization", back_populates="memberships")
+    user = relationship("User", back_populates="memberships", foreign_keys=[user_id])
+    inviter = relationship("User", foreign_keys=[invited_by])
+
+    # Constraints
+    __table_args__ = (
+        CheckConstraint("role IN ('admin', 'analyst', 'viewer')", name='valid_role'),
+        Index('idx_memberships_org', 'organization_id'),
+        Index('idx_memberships_user', 'user_id'),
+        Index('idx_memberships_role', 'role'),
+        {'extend_existing': True}  # Allow unique constraint to be defined separately
+    )
+
+    def __repr__(self):
+        return f"<OrganizationMembership(org={self.organization_id}, user={self.user_id}, role={self.role})>"
+
+    def to_dict(self) -> dict:
+        """Convert membership to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "organization_id": str(self.organization_id),
+            "user_id": str(self.user_id),
+            "role": self.role,
+            "is_active": self.is_active,
+            "invited_by": str(self.invited_by) if self.invited_by else None,
+            "invited_at": self.invited_at.isoformat() if self.invited_at else None,
+            "joined_at": self.joined_at.isoformat() if self.joined_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class OrganizationSettings(Base):
+    """
+    Per-organization configuration and feature flags.
+
+    Controls limits, features, and notification preferences.
+    Week 4: RBAC & Organization Isolation
+    """
+    __tablename__ = "organization_settings"
+
+    # Primary key (one-to-one with organizations)
+    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), primary_key=True)
+
+    # Limits
+    max_scans_per_month = Column(Integer, default=10)
+    max_team_members = Column(Integer, default=5)
+    max_api_keys = Column(Integer, default=3)
+    retention_days = Column(Integer, default=90)
+
+    # Feature flags
+    enable_scheduled_scans = Column(Boolean, default=False)
+    enable_slack_integration = Column(Boolean, default=False)
+    enable_jira_integration = Column(Boolean, default=False)
+    enable_custom_branding = Column(Boolean, default=False)
+
+    # Notification preferences
+    notify_on_critical = Column(Boolean, default=True)
+    notify_on_high = Column(Boolean, default=True)
+    notify_on_new_findings = Column(Boolean, default=True)
+
+    # SLA overrides (null = use severity defaults)
+    sla_critical_hours = Column(Integer, nullable=True)
+    sla_high_hours = Column(Integer, nullable=True)
+    sla_medium_hours = Column(Integer, nullable=True)
+    sla_low_hours = Column(Integer, nullable=True)
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    organization = relationship("Organization", back_populates="settings")
+
+    def __repr__(self):
+        return f"<OrganizationSettings(org={self.organization_id}, tier={self.organization.tier if self.organization else 'unknown'})>"
+
+    def to_dict(self) -> dict:
+        """Convert settings to dictionary for API responses."""
+        return {
+            "organization_id": str(self.organization_id),
+            "max_scans_per_month": self.max_scans_per_month,
+            "max_team_members": self.max_team_members,
+            "max_api_keys": self.max_api_keys,
+            "retention_days": self.retention_days,
+            "enable_scheduled_scans": self.enable_scheduled_scans,
+            "enable_slack_integration": self.enable_slack_integration,
+            "enable_jira_integration": self.enable_jira_integration,
+            "enable_custom_branding": self.enable_custom_branding,
+            "notify_on_critical": self.notify_on_critical,
+            "notify_on_high": self.notify_on_high,
+            "notify_on_new_findings": self.notify_on_new_findings,
+            "sla_critical_hours": self.sla_critical_hours,
+            "sla_high_hours": self.sla_high_hours,
+            "sla_medium_hours": self.sla_medium_hours,
+            "sla_low_hours": self.sla_low_hours,
+        }
+
+
+class ApiKey(Base):
+    """
+    API keys for programmatic access with scoped permissions.
+
+    Each key belongs to an organization and has granular scopes.
+    Week 4: RBAC & Organization Isolation
+    """
+    __tablename__ = "api_keys"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False, index=True)
+    created_by = Column(PG_UUID(as_uuid=True), ForeignKey('users.id'), nullable=False)
+
+    # Key details
+    name = Column(String, nullable=False)
+    key_hash = Column(String, unique=True, nullable=False, index=True)
+    key_prefix = Column(String, nullable=False, index=True)
+    scopes = Column(ARRAY(String), nullable=False, default=['read:scans'])
+
+    # Status and expiration
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_used_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    # Relationships
+    organization = relationship("Organization", back_populates="api_keys")
+    created_by_user = relationship("User", back_populates="created_api_keys")
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_api_keys_org', 'organization_id'),
+        Index('idx_api_keys_hash', 'key_hash'),
+        Index('idx_api_keys_prefix', 'key_prefix'),
+    )
+
+    def __repr__(self):
+        return f"<ApiKey(name={self.name}, prefix={self.key_prefix})>"
+
+    def to_dict(self, include_hash: bool = False) -> dict:
+        """Convert API key to dictionary for API responses."""
+        data = {
+            "id": str(self.id),
+            "organization_id": str(self.organization_id),
+            "created_by": str(self.created_by),
+            "name": self.name,
+            "key_prefix": self.key_prefix,
+            "scopes": self.scopes if self.scopes else [],
+            "is_active": self.is_active,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+        if include_hash:
+            data["key_hash"] = self.key_hash
+        return data
+
+
+class AuditLog(Base):
+    """
+    Audit trail for all RBAC-related actions.
+
+    Tracks user actions, IP addresses, and resource changes.
+    Week 4: RBAC & Organization Isolation
+    """
+    __tablename__ = "audit_log"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='SET NULL'), nullable=True, index=True)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+
+    # Action details
+    action = Column(String, nullable=False, index=True)
+    resource_type = Column(String, nullable=False)
+    resource_id = Column(PG_UUID(as_uuid=True), nullable=True)
+    details = Column(JSONB, default={})
+
+    # Request context
+    ip_address = Column(String, nullable=True)  # Using String instead of INET for simplicity
+    user_agent = Column(Text, nullable=True)
+
+    # Timestamp
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    # Relationships
+    organization = relationship("Organization", back_populates="audit_logs")
+    user = relationship("User", back_populates="audit_logs")
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_audit_log_org', 'organization_id', 'created_at'),
+        Index('idx_audit_log_user', 'user_id', 'created_at'),
+        Index('idx_audit_log_action', 'action'),
+        Index('idx_audit_log_resource', 'resource_type', 'resource_id'),
+    )
+
+    def __repr__(self):
+        return f"<AuditLog(action={self.action}, resource_type={self.resource_type})>"
+
+    def to_dict(self) -> dict:
+        """Convert audit log entry to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "organization_id": str(self.organization_id) if self.organization_id else None,
+            "user_id": str(self.user_id) if self.user_id else None,
+            "action": self.action,
+            "resource_type": self.resource_type,
+            "resource_id": str(self.resource_id) if self.resource_id else None,
+            "details": self.details if self.details else {},
+            "ip_address": self.ip_address,
+            "user_agent": self.user_agent,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# Update existing Scan model to include organization relationship
+Scan.organization_id = Column(PG_UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=True, index=True)
+Scan.organization = relationship("Organization", back_populates="scans")
