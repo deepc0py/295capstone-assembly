@@ -182,6 +182,9 @@ class Finding(Base):
 
     # Relationships
     scan = relationship("Scan", back_populates="findings")
+    triage = relationship("FindingTriage", back_populates="finding", uselist=False, cascade="all, delete-orphan")
+    comments = relationship("FindingComment", back_populates="finding", cascade="all, delete-orphan")
+    status_history = relationship("FindingStatusHistory", back_populates="finding", cascade="all, delete-orphan")
 
     # Table constraints
     __table_args__ = (
@@ -301,4 +304,212 @@ class ScanComparison(Base):
             "resolved_finding_ids": [str(fid) for fid in self.resolved_finding_ids] if self.resolved_finding_ids else [],
             "regressed_finding_ids": [str(fid) for fid in self.regressed_finding_ids] if self.regressed_finding_ids else [],
             "comparison_data": self.comparison_data,
+        }
+
+
+# ============================================================================
+# Triage Models (Week 3)
+# ============================================================================
+
+class FindingTriage(Base):
+    """
+    Finding triage information for analyst workflow.
+
+    Tracks status, assignment, validation, and SLA for individual findings.
+    Week 3: Triage Workflow
+    """
+    __tablename__ = "finding_triage"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    finding_id = Column(PG_UUID(as_uuid=True), ForeignKey('findings.id', ondelete='CASCADE'), nullable=False, unique=True)
+
+    # Status tracking
+    status = Column(String, nullable=False, default='new')
+    previous_status = Column(String, nullable=True)
+    status_changed_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    status_changed_by = Column(String, nullable=True)
+
+    # Assignment tracking
+    assigned_to = Column(String, nullable=True)
+    assigned_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    assigned_by = Column(String, nullable=True)
+
+    # Validation tracking
+    validated_by = Column(String, nullable=True)
+    validated_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    validation_notes = Column(Text, nullable=True)
+
+    # SLA tracking
+    sla_deadline = Column(TIMESTAMP(timezone=True), nullable=True)
+    sla_days = Column(Integer, nullable=True)
+    # is_overdue is a computed column in PostgreSQL, not defined in SQLAlchemy
+
+    # Risk acceptance
+    risk_acceptance_reason = Column(Text, nullable=True)
+    risk_accepted_by = Column(String, nullable=True)
+    risk_accepted_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # Metadata
+    priority_override = Column(Integer, nullable=True)
+    tags = Column(ARRAY(String), default=[])
+    metadata = Column(JSONB, default={})
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    finding = relationship("Finding", back_populates="triage", uselist=False)
+    comments = relationship("FindingComment", back_populates="triage", cascade="all, delete-orphan")
+    status_history = relationship("FindingStatusHistory", back_populates="triage", cascade="all, delete-orphan")
+
+    # Table constraints
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('new', 'validated', 'false_positive', 'duplicate', 'risk_accepted', 'in_progress', 'resolved', 'wont_fix')",
+            name='finding_triage_status_check'
+        ),
+        CheckConstraint(
+            'priority_override IS NULL OR (priority_override >= 0 AND priority_override <= 100)',
+            name='valid_priority_override'
+        ),
+    )
+
+    def __repr__(self):
+        return f"<FindingTriage(finding_id={self.finding_id}, status={self.status})>"
+
+    def to_dict(self) -> dict:
+        """Convert triage info to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "finding_id": str(self.finding_id),
+            "status": self.status,
+            "previous_status": self.previous_status,
+            "status_changed_at": self.status_changed_at.isoformat() if self.status_changed_at else None,
+            "status_changed_by": self.status_changed_by,
+            "assigned_to": self.assigned_to,
+            "assigned_at": self.assigned_at.isoformat() if self.assigned_at else None,
+            "assigned_by": self.assigned_by,
+            "validated_by": self.validated_by,
+            "validated_at": self.validated_at.isoformat() if self.validated_at else None,
+            "validation_notes": self.validation_notes,
+            "sla_deadline": self.sla_deadline.isoformat() if self.sla_deadline else None,
+            "sla_days": self.sla_days,
+            "risk_acceptance_reason": self.risk_acceptance_reason,
+            "risk_accepted_by": self.risk_accepted_by,
+            "risk_accepted_at": self.risk_accepted_at.isoformat() if self.risk_accepted_at else None,
+            "priority_override": self.priority_override,
+            "tags": self.tags if self.tags else [],
+            "metadata": self.metadata if self.metadata else {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class FindingComment(Base):
+    """
+    Comments and notes on findings for analyst collaboration.
+
+    Supports @mentions, attachments, and different comment types.
+    Week 3: Triage Workflow
+    """
+    __tablename__ = "finding_comments"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    finding_id = Column(PG_UUID(as_uuid=True), ForeignKey('findings.id', ondelete='CASCADE'), nullable=False)
+
+    # Comment content
+    author = Column(String, nullable=False)
+    comment = Column(Text, nullable=False)
+    comment_type = Column(String, default='note')
+
+    # Metadata
+    is_internal = Column(Boolean, default=False)
+    mentions = Column(ARRAY(String), default=[])
+    attachments = Column(JSONB, default=[])
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+    edited_by = Column(String, nullable=True)
+
+    # Relationships
+    finding = relationship("Finding", back_populates="comments")
+    triage = relationship("FindingTriage", back_populates="comments")
+
+    # Table constraints
+    __table_args__ = (
+        CheckConstraint(
+            "comment_type IN ('note', 'analysis', 'remediation', 'escalation', 'resolution')",
+            name='finding_comments_comment_type_check'
+        ),
+    )
+
+    def __repr__(self):
+        return f"<FindingComment(finding_id={self.finding_id}, author={self.author})>"
+
+    def to_dict(self) -> dict:
+        """Convert comment to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "finding_id": str(self.finding_id),
+            "author": self.author,
+            "comment": self.comment,
+            "comment_type": self.comment_type,
+            "is_internal": self.is_internal,
+            "mentions": self.mentions if self.mentions else [],
+            "attachments": self.attachments if self.attachments else [],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "edited_by": self.edited_by,
+        }
+
+
+class FindingStatusHistory(Base):
+    """
+    Audit trail for finding status changes.
+
+    Records every status transition with context and timestamp.
+    Week 3: Triage Workflow
+    """
+    __tablename__ = "finding_status_history"
+
+    # Primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    finding_id = Column(PG_UUID(as_uuid=True), ForeignKey('findings.id', ondelete='CASCADE'), nullable=False)
+
+    # Status change tracking
+    old_status = Column(String, nullable=True)
+    new_status = Column(String, nullable=False)
+    changed_by = Column(String, nullable=False)
+    change_reason = Column(Text, nullable=True)
+
+    # Context at time of change
+    assigned_to = Column(String, nullable=True)
+    sla_deadline = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # Timestamp
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    # Relationships
+    finding = relationship("Finding", back_populates="status_history")
+    triage = relationship("FindingTriage", back_populates="status_history")
+
+    def __repr__(self):
+        return f"<FindingStatusHistory(finding_id={self.finding_id}, {self.old_status} → {self.new_status})>"
+
+    def to_dict(self) -> dict:
+        """Convert status history to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "finding_id": str(self.finding_id),
+            "old_status": self.old_status,
+            "new_status": self.new_status,
+            "changed_by": self.changed_by,
+            "change_reason": self.change_reason,
+            "assigned_to": self.assigned_to,
+            "sla_deadline": self.sla_deadline.isoformat() if self.sla_deadline else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
