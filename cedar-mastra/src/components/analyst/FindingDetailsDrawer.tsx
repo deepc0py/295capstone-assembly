@@ -12,6 +12,10 @@ import { cn } from "@/lib/utils";
 import { cedar, cedarPayloadShapes } from "@/lib/cedar/actions";
 import { getSeverityColor, Severity } from "@/lib/utils/severity";
 import { useFindingActions } from "@/lib/cedar/useFindingActions";
+import { TriageStatusDropdown } from "@/components/triage/TriageStatusDropdown";
+import { AssigneeSelector } from "@/components/triage/AssigneeSelector";
+import { SLADetails } from "@/components/triage/SLATimer";
+import { CommentsSection } from "@/components/triage/CommentsSection";
 
 interface FindingDetailsDrawerProps {
   finding: Finding | null;
@@ -98,10 +102,11 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
       {/* Tabs */}
       <ScrollArea className="flex-1">
         <Tabs defaultValue="overview" className="p-6">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="evidence">Evidence & Repro</TabsTrigger>
             <TabsTrigger value="compliance">Compliance</TabsTrigger>
+            <TabsTrigger value="triage">Triage</TabsTrigger>
             <TabsTrigger value="history">History</TabsTrigger>
           </TabsList>
 
@@ -226,6 +231,81 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
               <Plus className="mr-2 h-3 w-3" />
               Add Compliance to Chat
             </Button>
+          </TabsContent>
+
+          <TabsContent value="triage" className="space-y-6 mt-4">
+            {finding.triage ? (
+              <>
+                <div className="space-y-4">
+                  <div>
+                    <h4 className="font-medium text-sm mb-3 text-foreground">Status</h4>
+                    <TriageStatusDropdown
+                      findingId={finding.id}
+                      currentStatus={finding.triage.status as any}
+                      size="md"
+                      onChange={() => {
+                        toast.success("Triage status updated");
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <h4 className="font-medium text-sm mb-3 text-foreground">Assignee</h4>
+                    <AssigneeSelector
+                      findingId={finding.id}
+                      currentAssignee={finding.triage.assigned_to}
+                      size="md"
+                      onChange={() => {
+                        toast.success("Assignee updated");
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <h4 className="font-medium text-sm mb-3 text-foreground">SLA</h4>
+                    <SLADetails
+                      slaDeadline={finding.triage.sla_deadline}
+                      status={finding.triage.status}
+                    />
+                  </div>
+                </div>
+
+                <div className="border-t pt-6">
+                  <CommentsSection
+                    findingId={finding.id}
+                    onCommentAdded={() => {
+                      toast.success("Comment added");
+                    }}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="text-sm text-muted-foreground">
+                <p className="mb-4">This finding has not been triaged yet.</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      const response = await fetch(`http://localhost:8000/api/finding/${finding.id}/triage`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ auto_sla: true }),
+                      });
+
+                      if (!response.ok) throw new Error("Failed to create triage");
+
+                      toast.success("Triage created successfully");
+                      // In a real app, you'd refresh the finding data here
+                    } catch (error) {
+                      toast.error("Failed to create triage");
+                    }
+                  }}
+                >
+                  Create Triage Record
+                </Button>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="history" className="space-y-4 mt-4">

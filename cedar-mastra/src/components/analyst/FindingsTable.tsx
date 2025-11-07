@@ -35,6 +35,9 @@ import { cedar, cedarPayloadShapes, cedarEstimateTokens } from "@/lib/cedar/acti
 import { useCedarActions } from "@/lib/cedar/hooks";
 import { getSeverityColor, Severity } from "@/lib/utils/severity";
 import { SeverityTooltip } from "@/components/shared/SeverityTooltip";
+import { TriageStatusDropdown } from "@/components/triage/TriageStatusDropdown";
+import { AssigneeAvatar, getTeamMembers } from "@/components/triage/AssigneeSelector";
+import { SLAIndicator } from "@/components/triage/SLATimer";
 
 interface FindingsTableProps {
   findings: Finding[];
@@ -80,10 +83,13 @@ export const FindingsTable = ({
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
+  const [assigneeFilter, setAssigneeFilter] = useState<string[]>([]);
   const [internalSelectedFindings, setInternalSelectedFindings] = useState<Set<string>>(new Set());
   const [addedFindings, setAddedFindings] = useState<Set<string>>(new Set());
   const { addItem } = useContextBasket();
   const { addToContext, sendMessage } = useCedarActions();
+
+  const teamMembers = getTeamMembers();
 
   // Use controlled state if provided, otherwise use internal state
   const selectedFindings = controlledSelectedFindings ?? internalSelectedFindings;
@@ -105,7 +111,16 @@ export const FindingsTable = ({
     const matchSeverity = severityFilter.length === 0 || severityFilter.includes(f.severity);
     const matchStatus = statusFilter.length === 0 || statusFilter.includes(f.status);
 
-    return matchSearch && matchSeverity && matchStatus;
+    // Assignee filter: match by team member ID or "unassigned"
+    const matchAssignee = assigneeFilter.length === 0 || assigneeFilter.some(assigneeId => {
+      const member = teamMembers.find(m => m.id === assigneeId);
+      if (assigneeId === "unassigned") {
+        return !f.triage?.assigned_to;
+      }
+      return f.triage?.assigned_to === member?.email;
+    });
+
+    return matchSearch && matchSeverity && matchStatus && matchAssignee;
   });
 
   const handleAddToChat = (finding: Finding, e?: React.MouseEvent) => {
@@ -357,6 +372,32 @@ export const FindingsTable = ({
             </DropdownMenuContent>
           </DropdownMenu>
 
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm">
+                <Filter className="mr-2 h-4 w-4" />
+                Assignee
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {teamMembers.map((member) => (
+                <DropdownMenuCheckboxItem
+                  key={member.id}
+                  checked={assigneeFilter.includes(member.id)}
+                  onCheckedChange={(checked) => {
+                    setAssigneeFilter(
+                      checked
+                        ? [...assigneeFilter, member.id]
+                        : assigneeFilter.filter((id) => id !== member.id)
+                    );
+                  }}
+                >
+                  {member.name}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <Button variant="outline" size="sm" onClick={onOpenDiff}>
             <GitCompare className="mr-2 h-4 w-4" />
             Diff vs Last Scan
@@ -412,6 +453,9 @@ export const FindingsTable = ({
                 <TableHead className="w-[120px]">Evidence</TableHead>
                 <TableHead className="w-[140px]">Scanner(s)</TableHead>
                 <TableHead className="w-[140px]">Status</TableHead>
+                <TableHead className="w-[160px]">Triage Status</TableHead>
+                <TableHead className="w-[140px]">Assignee</TableHead>
+                <TableHead className="w-[140px]">SLA</TableHead>
                 <TableHead className="w-[110px] text-right">
                   <div className="flex items-center justify-end gap-1">
                     Priority
@@ -539,6 +583,44 @@ export const FindingsTable = ({
                       <Badge variant="outline" className="text-xs">
                         {finding.status}
                       </Badge>
+                    </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      {finding.triage ? (
+                        <TriageStatusDropdown
+                          findingId={finding.id}
+                          currentStatus={finding.triage.status as any}
+                          size="sm"
+                          onChange={() => {
+                            // Refresh findings list after status change
+                            toast.success("Triage status updated");
+                          }}
+                        />
+                      ) : (
+                        <Badge variant="outline" className="text-xs text-muted-foreground">
+                          Not triaged
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      {finding.triage ? (
+                        <AssigneeAvatar
+                          assignee={finding.triage.assigned_to}
+                          size="sm"
+                          showTooltip={true}
+                        />
+                      ) : (
+                        <span className="text-xs text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {finding.triage ? (
+                        <SLAIndicator
+                          slaDeadline={finding.triage.sla_deadline}
+                          status={finding.triage.status}
+                        />
+                      ) : (
+                        <span className="text-xs text-muted-foreground">-</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <Tooltip>

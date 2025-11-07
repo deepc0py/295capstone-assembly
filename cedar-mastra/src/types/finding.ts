@@ -28,6 +28,15 @@ export interface Finding {
     isRegressed: boolean;
     isResolved: boolean;
   };
+  triage?: {
+    id: string;
+    status: string;
+    assigned_to: string | null;
+    sla_deadline: string | null;
+    is_overdue: boolean;
+    created_at: string;
+    updated_at: string;
+  };
   summaryHumanReadable?: string;
   nistCsf?: string[];
   nist80053?: string[];
