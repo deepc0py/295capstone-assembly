@@ -216,7 +216,7 @@ async def login(request: Request, login_req: LoginRequest):
 @limiter.limit(RateLimits.SCAN_START)
 async def start_scan(
     request: Request,
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),
     server_url: str = Form(...),
     target_url: Optional[str] = Form(None),
     rps: float = Form(2.0),
@@ -241,7 +241,7 @@ async def start_scan(
         if spec_file:
             print(f"DEBUG: spec_file.filename={spec_file.filename}")
             print(f"DEBUG: spec_file.content_type={spec_file.content_type}")
-        print(f"DEBUG: user={user}")
+        print(f"DEBUG: current_user={current_user}")
 
         # Validate scan parameters
         validate_scan_params(rps, max_requests)
@@ -252,11 +252,12 @@ async def start_scan(
         if target_url:
             print(f"DEBUG: Validating target_url: {target_url!r}")
             validate_url(target_url, allow_localhost=True)
-        
-        # Only admins can run dangerous scans
-        if dangerous and not user.get('is_admin'):
-            log_security_event("unauthorized_dangerous_scan", user['username'], {
-                "ip": request.client.host
+
+        # Only admins can run dangerous scans (Week 4: RBAC role check)
+        if dangerous and current_user["role"] != "admin" and not current_user.get("is_superuser"):
+            log_security_event("unauthorized_dangerous_scan", current_user['username'], {
+                "ip": request.client.host,
+                "organization_id": str(current_user["organization_id"])
             })
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -317,22 +318,24 @@ async def start_scan(
             "fuzz_auth": fuzz_auth
         }
         
-        log_security_event("scan_started", user['username'], {
+        log_security_event("scan_started", current_user['username'], {
             "scan_id": scan_id,
             "ip": request.client.host,
             "server_url": server_url,
-            "dangerous": dangerous
+            "dangerous": dangerous,
+            "organization_id": str(current_user["organization_id"])
         })
-        
+
         # Execute scan using Docker container
         print(f"🚀 Starting direct scan execution for {scan_id}")
-        
+
         # Start the scan in the background with progress monitoring
-        asyncio.create_task(execute_multi_scan(scan_id, user, dangerous, fuzz_auth, rps, max_requests))
+        asyncio.create_task(execute_multi_scan(scan_id, current_user, dangerous, fuzz_auth, rps, max_requests))
         asyncio.create_task(monitor_scan_progress(scan_id))
-        
-        # Update user scan count
-        user_db.users[user['username']]['scan_count'] += 1
+
+        # Update user scan count (legacy - keeping for backward compatibility)
+        if current_user['username'] in user_db.users:
+            user_db.users[current_user['username']]['scan_count'] += 1
         
         return {"scan_id": scan_id, "status": "pending"}
         
