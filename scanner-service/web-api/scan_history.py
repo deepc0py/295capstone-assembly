@@ -36,7 +36,8 @@ async def store_scan_result(
     api_base_url: str,
     findings: List[Dict[str, Any]],
     scanner_config: Dict[str, Any],
-    created_by: Optional[str] = None,
+    created_by: Optional[UUID] = None,
+    organization_id: Optional[UUID] = None,
     status: str = "completed"
 ) -> Scan:
     """
@@ -48,7 +49,8 @@ async def store_scan_result(
         api_base_url: Base URL of the API that was scanned
         findings: List of vulnerability findings
         scanner_config: Scanner configuration (engines, dangerous_mode, etc.)
-        created_by: User who initiated the scan
+        created_by: User UUID who initiated the scan (Week 4: RBAC)
+        organization_id: Organization UUID (Week 4: RBAC)
         status: Scan status (pending, running, completed, failed)
 
     Returns:
@@ -75,7 +77,8 @@ async def store_scan_result(
             id=uuid4(),
             scan_id=scan_id,
             api_base_url=api_base_url,
-            created_by=created_by,
+            created_by=created_by,  # UUID (Week 4: RBAC)
+            organization_id=organization_id,  # UUID (Week 4: RBAC)
             status=status,
             total_findings=len(findings),
             critical_count=severity_counts["Critical"],
@@ -107,6 +110,7 @@ async def store_scan_result(
             finding = Finding(
                 id=uuid4(),
                 scan_id=scan.id,
+                organization_id=organization_id,  # UUID (Week 4: RBAC)
                 rule=finding_data.get("rule", "UNKNOWN"),
                 title=finding_data.get("title", "Untitled Vulnerability"),
                 severity=finding_data.get("severity", "Low"),
@@ -223,8 +227,9 @@ async def get_scan_by_id(
 
 async def list_scans(
     db: Session,
+    organization_id: Optional[UUID] = None,
     api_base_url: Optional[str] = None,
-    created_by: Optional[str] = None,
+    created_by: Optional[UUID] = None,
     status: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
@@ -236,8 +241,9 @@ async def list_scans(
 
     Args:
         db: Database session
+        organization_id: Filter by organization UUID (Week 4: RBAC)
         api_base_url: Filter by API base URL
-        created_by: Filter by user who created the scan
+        created_by: Filter by user UUID who created the scan
         status: Filter by scan status
         limit: Maximum number of results
         offset: Number of results to skip
@@ -250,6 +256,10 @@ async def list_scans(
     try:
         # Build query with filters
         query = db.query(Scan).filter(Scan.deleted_at.is_(None))
+
+        # Week 4: RBAC - Filter by organization
+        if organization_id:
+            query = query.filter(Scan.organization_id == organization_id)
 
         if api_base_url:
             query = query.filter(Scan.api_base_url == api_base_url)
