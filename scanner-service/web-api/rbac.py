@@ -5,6 +5,7 @@ Week 4: Multi-tenant organization isolation with permission checks.
 """
 
 import hashlib
+import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -25,7 +26,7 @@ from database import get_db
 # Configuration
 # ============================================================================
 
-SECRET_KEY = "your-secret-key-here"  # TODO: Move to environment variable
+SECRET_KEY = os.getenv("JWT_SECRET", "insecure-dev-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
