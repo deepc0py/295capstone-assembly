@@ -1,6 +1,12 @@
+/**
+ * Authentication Page (Week 4: RBAC)
+ *
+ * Login and registration using RBAC backend
+ */
+
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,94 +16,46 @@ import { User, Shield, Briefcase } from "lucide-react";
 import cyberBearLogo from "@/assets/cyber-bear-logo.png";
 import { z } from "zod";
 
-const signupSchema = z.object({
+const loginSchema = z.object({
   email: z.string().email("Invalid email address").max(255, "Email too long"),
-  password: z.string().min(8, "Password must be at least 8 characters").max(100, "Password too long"),
-  company: z.string().max(100, "Company name too long").optional(),
+  password: z.string().min(1, "Password is required").max(100, "Password too long"),
 });
 
-type Persona = "developer" | "analyst" | "executive";
+const registerSchema = z.object({
+  email: z.string().email("Invalid email address").max(255, "Email too long"),
+  password: z.string().min(8, "Password must be at least 8 characters").max(100, "Password too long"),
+  username: z.string().min(3, "Username must be at least 3 characters").max(50, "Username too long"),
+  organizationName: z.string().min(1, "Organization name is required").max(100, "Organization name too long"),
+});
+
+type Role = "analyst" | "developer" | "executive";
 
 const Auth = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user, login, register, isLoading: authLoading } = useAuth();
+
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [company, setCompany] = useState("");
-  const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
+  const [username, setUsername] = useState("");
+  const [organizationName, setOrganizationName] = useState("");
+  const [selectedRole, setSelectedRole] = useState<Role | null>(null);
   const [showForgotPassword, setShowForgotPassword] = useState(false);
 
+  // Redirect if already logged in
   useEffect(() => {
-    const checkAuth = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        navigate("/dashboard");
-      }
-    };
-    checkAuth();
-  }, [navigate]);
-
-  const handleSignup = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!selectedPersona) {
-      toast({
-        title: "Persona Required",
-        description: "Please select your persona to continue",
-        variant: "destructive",
-      });
-      return;
+    if (user && !authLoading) {
+      navigate("/dashboard");
     }
-
-    // Validate input
-    const validation = signupSchema.safeParse({ email, password, company });
-    if (!validation.success) {
-      toast({
-        title: "Validation Error",
-        description: validation.error.errors[0].message,
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoading(true);
-
-    const { error } = await supabase.auth.signUp({
-      email: validation.data.email,
-      password: validation.data.password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/dashboard`,
-        data: {
-          persona: selectedPersona,
-          company: validation.data.company || "",
-        },
-      },
-    });
-
-    setLoading(false);
-
-    if (error) {
-      toast({
-        title: "Signup Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-    } else {
-      toast({
-        title: "Account Created!",
-        description: "Redirecting to scanner...",
-      });
-      navigate("/scanner");
-    }
-  };
+  }, [user, authLoading, navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
 
     // Validate input
-    const validation = signupSchema.pick({ email: true, password: true }).safeParse({ email, password });
+    const validation = loginSchema.safeParse({ email, password });
     if (!validation.success) {
       toast({
         title: "Validation Error",
@@ -108,76 +66,73 @@ const Auth = () => {
     }
 
     setLoading(true);
+    try {
+      await login(validation.data.email, validation.data.password);
+    } catch (error) {
+      // Error handling done in AuthContext
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: validation.data.email,
-      password: validation.data.password,
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // Validate input
+    const validation = registerSchema.safeParse({
+      email,
+      password,
+      username,
+      organizationName
     });
-
-    setLoading(false);
-
-    if (error) {
+    if (!validation.success) {
       toast({
-        title: "Login Failed",
-        description: error.message,
+        title: "Validation Error",
+        description: validation.error.errors[0].message,
         variant: "destructive",
       });
-    } else {
-      navigate("/dashboard");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await register(
+        validation.data.email,
+        validation.data.password,
+        validation.data.username,
+        validation.data.organizationName
+      );
+    } catch (error) {
+      // Error handling done in AuthContext
+    } finally {
+      setLoading(false);
     }
   };
 
   const handlePasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    const validation = z.string().email("Invalid email address").safeParse(email);
-    if (!validation.success) {
-      toast({
-        title: "Validation Error",
-        description: "Please enter a valid email address",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoading(true);
-
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth`,
+    toast({
+      title: "Password Reset",
+      description: "Password reset functionality will be available soon. Please contact support.",
     });
-
-    setLoading(false);
-
-    if (error) {
-      toast({
-        title: "Reset Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-    } else {
-      toast({
-        title: "Check Your Email",
-        description: "We've sent you a password reset link",
-      });
-      setShowForgotPassword(false);
-    }
   };
 
-  const personas = [
+  const roles = [
     {
-      id: "analyst" as Persona,
+      id: "analyst" as Role,
       icon: Shield,
-      label: "Beginner/Analyst",
-      description: "Analyze and report vulnerabilities",
+      label: "Analyst",
+      description: "Analyze and triage vulnerabilities",
     },
     {
-      id: "developer" as Persona,
+      id: "developer" as Role,
       icon: User,
       label: "Developer",
       description: "Build and test APIs",
     },
     {
-      id: "executive" as Persona,
+      id: "executive" as Role,
       icon: Briefcase,
       label: "Executive",
       description: "Monitor compliance and risk",
@@ -195,8 +150,8 @@ const Auth = () => {
             {showForgotPassword ? "Reset Password" : isLogin ? "Welcome Back" : "Create Account"}
           </CardTitle>
           <CardDescription>
-            {showForgotPassword 
-              ? "Enter your email to receive a password reset link" 
+            {showForgotPassword
+              ? "Enter your email to receive a password reset link"
               : isLogin ? "Sign in to access your dashboard" : "Join VentiAPI to secure your APIs"}
           </CardDescription>
         </CardHeader>
@@ -231,7 +186,7 @@ const Auth = () => {
               </div>
             </form>
           ) : (
-          <form onSubmit={isLogin ? handleLogin : handleSignup} className="space-y-4">
+          <form onSubmit={isLogin ? handleLogin : handleRegister} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -254,7 +209,7 @@ const Auth = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                minLength={8}
+                minLength={isLogin ? 1 : 8}
                 maxLength={100}
               />
             </div>
@@ -262,36 +217,51 @@ const Auth = () => {
             {!isLogin && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="company">Company (Optional)</Label>
+                  <Label htmlFor="username">Username</Label>
                   <Input
-                    id="company"
+                    id="username"
+                    type="text"
+                    placeholder="johndoe"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    required
+                    minLength={3}
+                    maxLength={50}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="organizationName">Organization Name</Label>
+                  <Input
+                    id="organizationName"
                     type="text"
                     placeholder="Acme Inc."
-                    value={company}
-                    onChange={(e) => setCompany(e.target.value)}
+                    value={organizationName}
+                    onChange={(e) => setOrganizationName(e.target.value)}
+                    required
                     maxLength={100}
                   />
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Select Your Persona</Label>
+                  <Label>Select Your Role (Optional)</Label>
                   <div className="grid grid-cols-1 gap-2">
-                    {personas.map((persona) => (
+                    {roles.map((role) => (
                       <button
-                        key={persona.id}
+                        key={role.id}
                         type="button"
-                        onClick={() => setSelectedPersona(persona.id)}
+                        onClick={() => setSelectedRole(role.id)}
                         className={`flex items-start gap-3 p-3 rounded-lg border-2 transition-all text-left ${
-                          selectedPersona === persona.id
+                          selectedRole === role.id
                             ? "border-primary bg-primary/10"
                             : "border-border hover:border-primary/50"
                         }`}
                       >
-                        <persona.icon className="w-5 h-5 mt-0.5 text-primary" />
+                        <role.icon className="w-5 h-5 mt-0.5 text-primary" />
                         <div>
-                          <div className="font-medium">{persona.label}</div>
+                          <div className="font-medium">{role.label}</div>
                           <div className="text-sm text-muted-foreground">
-                            {persona.description}
+                            {role.description}
                           </div>
                         </div>
                       </button>
@@ -301,8 +271,8 @@ const Auth = () => {
               </>
             )}
 
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "Please wait..." : isLogin ? "Sign In" : "Create Account"}
+            <Button type="submit" className="w-full" disabled={loading || authLoading}>
+              {loading || authLoading ? "Please wait..." : isLogin ? "Sign In" : "Create Account"}
             </Button>
 
             {isLogin && (
@@ -323,7 +293,13 @@ const Auth = () => {
             <div className="mt-4 text-center text-sm">
               {isLogin ? "Don't have an account?" : "Already have an account?"}{" "}
               <button
-                onClick={() => setIsLogin(!isLogin)}
+                onClick={() => {
+                  setIsLogin(!isLogin);
+                  setPassword("");
+                  setUsername("");
+                  setOrganizationName("");
+                  setSelectedRole(null);
+                }}
                 className="text-primary font-medium hover:underline"
               >
                 {isLogin ? "Sign up" : "Sign in"}
