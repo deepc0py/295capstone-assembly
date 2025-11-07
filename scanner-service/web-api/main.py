@@ -746,14 +746,22 @@ def parse_zap_results(scan_id: str, server_url: str) -> List[Dict]:
         print(traceback.format_exc())
         return []
 
-async def persist_scan_to_database(scan_id: str, scan_data: Dict, scanner_list: List[str]):
+async def persist_scan_to_database(
+    scan_id: str,
+    scan_data: Dict,
+    scanner_list: List[str],
+    created_by: Optional[UUIDType] = None,
+    organization_id: Optional[UUIDType] = None
+):
     """
-    Persist completed scan results to PostgreSQL database (Week 2).
+    Persist completed scan results to PostgreSQL database (Week 2, updated Week 4).
 
     Args:
         scan_id: Unique scan identifier
         scan_data: In-memory scan data dictionary
         scanner_list: List of scanner engines used
+        created_by: User UUID who initiated the scan (Week 4: RBAC)
+        organization_id: Organization UUID (Week 4: RBAC)
     """
     print(f"📝 Persisting scan {scan_id} to database...")
 
@@ -794,7 +802,8 @@ async def persist_scan_to_database(scan_id: str, scan_data: Dict, scanner_list: 
             api_base_url=scan_data.get("server_url", ""),
             findings=all_findings,
             scanner_config=scanner_config,
-            created_by=None,  # TODO: Get from JWT token in future
+            created_by=created_by,  # Week 4: RBAC - User UUID
+            organization_id=organization_id,  # Week 4: RBAC - Org UUID
             status="completed"
         )
 
@@ -1016,7 +1025,7 @@ async def get_scan_report_html(
 
 @app.get("/api/scans")
 async def list_scans(
-    user: Dict = Depends(verify_token),
+    current_user: Dict = Depends(rbac.get_current_active_user),
     db: Session = Depends(get_db),
     api_base_url: Optional[str] = None,
     status: Optional[str] = None,
@@ -1026,7 +1035,7 @@ async def list_scans(
     order_direction: str = "desc"
 ):
     """
-    List scans with filtering and pagination (Week 2).
+    List scans with filtering and pagination (Week 2, updated Week 4).
 
     Query params:
     - api_base_url: Filter by API base URL
@@ -1035,13 +1044,16 @@ async def list_scans(
     - offset: Pagination offset (default: 0)
     - order_by: Sort field (created_at, completed_at)
     - order_direction: Sort direction (asc, desc)
+
+    Week 4: RBAC - Filters by current user's organization automatically.
     """
     try:
-        # Query database for historical scans
+        # Query database for historical scans (Week 4: RBAC - filter by organization)
         db_scans, total_count = await scan_history.list_scans(
             db=db,
+            organization_id=current_user["organization_id"],  # Week 4: RBAC
             api_base_url=api_base_url,
-            created_by=user['username'],
+            created_by=None,  # Don't filter by user, filter by org instead
             status=status,
             limit=limit,
             offset=offset,
@@ -1065,7 +1077,8 @@ async def list_scans(
                 "created_at": scan_data.get("created_at"),
                 "updated_at": None,
                 "completed_at": None,
-                "created_by": user['username'],
+                "created_by": current_user['username'],
+                "organization_id": str(current_user["organization_id"]),  # Week 4: RBAC
                 "status": scan_data.get("status", "pending"),
                 "total_findings": scan_data.get("findings_count", 0),
                 "critical_count": 0,
@@ -1678,31 +1691,35 @@ async def get_status_history_endpoint(
 # End Triage Endpoints
 # ============================================================================
 
-async def execute_multi_scan(scan_id: str, user: Dict, dangerous: bool, fuzz_auth: bool, rps: float, max_requests: int):
-    """Execute scan using multiple scanner engines in parallel"""
+async def execute_multi_scan(scan_id: str, current_user: Dict, dangerous: bool, fuzz_auth: bool, rps: float, max_requests: int):
+    """Execute scan using multiple scanner engines in parallel (Week 4: RBAC updated)"""
     try:
         scan_data = scans[scan_id]
         scanner_list = scan_data.get("scanners", ["ventiapi"])
-        
+
+        # Week 4: RBAC - Extract organization context
+        organization_id = current_user.get("organization_id")
+        user_id = current_user.get("user_id")
+
         scan_data["status"] = "running"
         scan_data["current_phase"] = f"Starting {len(scanner_list)} scanner(s)"
         scan_data["progress"] = 10
-        
+
         # Get scan parameters
         server_url = scan_data["server_url"]
         target_url = scan_data["target_url"]
         spec_location = scan_data["spec_location"]
-        
+
         # Determine volume prefix (for environment compatibility)
         volume_prefix = "295capstone-assembly"  # Default for local docker-compose
         if "ventiapi" in str(spec_location):  # AWS environment detection
             volume_prefix = "ventiapi"
-        
-        # Prepare scanner options
+
+        # Prepare scanner options (Week 4: RBAC - use role-based check)
         scanner_options = {
             'rps': rps,
             'max_requests': max_requests,
-            'dangerous': dangerous and user.get('is_admin', False),
+            'dangerous': dangerous and (current_user.get('role') == 'admin' or current_user.get('is_superuser', False)),
             'fuzz_auth': fuzz_auth,
             'volume_prefix': volume_prefix,
             'passive_scan': True,  # ZAP option
@@ -1758,9 +1775,15 @@ async def execute_multi_scan(scan_id: str, user: Dict, dangerous: bool, fuzz_aut
         # Store detailed results
         scan_data["scanner_results"] = results
 
-        # Persist scan results to database (Week 2)
+        # Persist scan results to database (Week 2, updated Week 4)
         try:
-            await persist_scan_to_database(scan_id, scan_data, scanner_list)
+            await persist_scan_to_database(
+                scan_id=scan_id,
+                scan_data=scan_data,
+                scanner_list=scanner_list,
+                created_by=user_id,  # Week 4: RBAC
+                organization_id=organization_id  # Week 4: RBAC
+            )
         except Exception as db_error:
             print(f"⚠️  Failed to persist scan {scan_id} to database: {db_error}")
             # Don't fail the scan if database storage fails (graceful degradation)
