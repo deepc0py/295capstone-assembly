@@ -2,6 +2,7 @@
 
 import { ExecutiveView } from "@/components/executive/ExecutiveView";
 import { ContextBasketProvider } from "@/contexts/ContextBasketContext";
+import { ScanSelector } from "@/components/shared/ScanSelector";
 import { TrendingUp } from "lucide-react";
 
 export default function ExecutivePage() {
@@ -31,6 +32,7 @@ export default function ExecutivePage() {
         </header>
 
         <main className="container mx-auto px-6 py-12">
+          <ScanSelector />
           <ExecutiveView />
         </main>
       </div>

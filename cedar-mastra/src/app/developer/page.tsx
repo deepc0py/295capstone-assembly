@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { DeveloperView } from "@/components/developer/DeveloperView";
 import { ContextBasketProvider } from "@/contexts/ContextBasketContext";
+import { ScanSelector } from "@/components/shared/ScanSelector";
 import { Code } from "lucide-react";
 
 export default function DeveloperPage() {
@@ -35,6 +36,8 @@ export default function DeveloperPage() {
         </header>
 
         <main className="container mx-auto px-6 py-12">
+          <ScanSelector />
+
           <DeveloperView
             selectedFindings={selectedFindingIds}
             onSelectionChange={setSelectedFindingIds}

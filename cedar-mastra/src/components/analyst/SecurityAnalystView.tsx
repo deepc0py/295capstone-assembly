@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { mockFindings } from "@/data/mockFindings";
 import { Finding } from "@/types/finding";
 import { FindingsTable } from "./FindingsTable";
@@ -10,6 +10,9 @@ import { ChatPresets } from "@/components/shared/ChatPresets";
 import { analystPresets } from "@/config/chatPresets";
 import { DashboardHeader } from "@/components/shared/DashboardHeader";
 import { useRegisterFindings } from "@/lib/cedar/useRegisterFindings";
+import { useScanResultsState } from "@/app/cedar-os/scanState";
+import { transformFindings, calculateDiffCounts } from "@/lib/transform-findings";
+import { AlertCircle } from "lucide-react";
 
 interface SecurityAnalystViewProps {
   selectedFindings?: Set<string>;
@@ -19,16 +22,21 @@ interface SecurityAnalystViewProps {
 export const SecurityAnalystView = ({ selectedFindings, onSelectionChange }: SecurityAnalystViewProps = {}) => {
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [showDiffModal, setShowDiffModal] = useState(false);
+  const { scanResults } = useScanResultsState();
+
+  // Transform real scan findings to analyst format or use mock data
+  const realFindings = useMemo(() => {
+    if (!scanResults) return mockFindings;
+    return transformFindings(scanResults.findings);
+  }, [scanResults]);
 
   // Register findings with Cedar for @mention functionality
-  const { findings } = useRegisterFindings(mockFindings);
+  const { findings } = useRegisterFindings(realFindings);
 
-  // Calculate diff counts from mock data
-  const diffCounts = {
-    new: mockFindings.filter(f => f.flags.isNew).length,
-    regressed: mockFindings.filter(f => f.flags.isRegressed).length,
-    resolved: mockFindings.filter(f => f.flags.isResolved).length,
-  };
+  // Calculate diff counts
+  const diffCounts = useMemo(() => {
+    return calculateDiffCounts(realFindings);
+  }, [realFindings]);
 
   return (
     <div className="space-y-6">
@@ -38,8 +46,22 @@ export const SecurityAnalystView = ({ selectedFindings, onSelectionChange }: Sec
         size="md"
       />
 
+      {/* Show warning if using mock data */}
+      {!scanResults && (
+        <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-4 flex items-start gap-3">
+          <AlertCircle className="h-5 w-5 text-yellow-500 mt-0.5 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-yellow-500">Using Sample Data</p>
+            <p className="text-xs text-yellow-500/80 mt-1">
+              No scan results loaded. Displaying sample findings for demonstration.
+              Load a scan to see real vulnerability data.
+            </p>
+          </div>
+        </div>
+      )}
+
       <FindingsTable
-        findings={mockFindings}
+        findings={realFindings}
         onRowClick={setSelectedFinding}
         onOpenDiff={() => setShowDiffModal(true)}
         diffCounts={diffCounts}
@@ -59,7 +81,7 @@ export const SecurityAnalystView = ({ selectedFindings, onSelectionChange }: Sec
       <DiffViewModal
         open={showDiffModal}
         onOpenChange={setShowDiffModal}
-        findings={mockFindings}
+        findings={realFindings}
       />
     </div>
   );
