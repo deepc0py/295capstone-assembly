@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Plus, Filter, Download, GitCompare, Info, Shield, Globe, AlertTriangle, CheckCircle2, AlertCircle, HelpCircle } from "lucide-react";
+import { Plus, Filter, Download, GitCompare, Info, Shield, Globe, AlertTriangle, CheckCircle2, AlertCircle, HelpCircle, EyeOff, Eye } from "lucide-react";
 import { Finding } from "@/types/finding";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -84,6 +84,7 @@ export const FindingsTable = ({
   const [severityFilter, setSeverityFilter] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [assigneeFilter, setAssigneeFilter] = useState<string[]>([]);
+  const [hideFalsePositives, setHideFalsePositives] = useState(true); // Week 5: Hide FPs by default
   const [internalSelectedFindings, setInternalSelectedFindings] = useState<Set<string>>(new Set());
   const [addedFindings, setAddedFindings] = useState<Set<string>>(new Set());
   const { addItem } = useContextBasket();
@@ -102,6 +103,11 @@ export const FindingsTable = ({
   };
 
   const filteredFindings = findings.filter((f) => {
+    // Week 5: Hide false positives by default (unless explicitly shown)
+    if (hideFalsePositives && f.triage?.status === 'false_positive') {
+      return false;
+    }
+
     const matchSearch =
       search === "" ||
       f.endpoint.path.toLowerCase().includes(search.toLowerCase()) ||
@@ -398,6 +404,26 @@ export const FindingsTable = ({
             </DropdownMenuContent>
           </DropdownMenu>
 
+          {/* Week 5: Toggle to show/hide false positives */}
+          <Button
+            variant={hideFalsePositives ? "outline" : "secondary"}
+            size="sm"
+            onClick={() => setHideFalsePositives(!hideFalsePositives)}
+            title={hideFalsePositives ? "Show false positives" : "Hide false positives"}
+          >
+            {hideFalsePositives ? (
+              <>
+                <EyeOff className="mr-2 h-4 w-4" />
+                Hide False Positives
+              </>
+            ) : (
+              <>
+                <Eye className="mr-2 h-4 w-4" />
+                Show False Positives
+              </>
+            )}
+          </Button>
+
           <Button variant="outline" size="sm" onClick={onOpenDiff}>
             <GitCompare className="mr-2 h-4 w-4" />
             Diff vs Last Scan
@@ -669,6 +695,10 @@ export const FindingsTable = ({
         <div className="text-sm text-muted-foreground">
           Showing {filteredFindings.length} of {findings.length} findings
           {selectedFindings.size > 0 && ` · ${selectedFindings.size} selected`}
+          {hideFalsePositives && (() => {
+            const fpCount = findings.filter(f => f.triage?.status === 'false_positive').length;
+            return fpCount > 0 ? ` · ${fpCount} false positive${fpCount > 1 ? 's' : ''} hidden` : '';
+          })()}
         </div>
       </div>
     </TooltipProvider>
