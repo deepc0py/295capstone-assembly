@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from models import Scan, Finding, ScanComparison
-from database import generate_fingerprint
 
 logger = logging.getLogger(__name__)
 

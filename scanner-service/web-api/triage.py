@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from models import Finding, FindingTriage, FindingComment, FindingStatusHistory
-from database import generate_fingerprint
 
 logger = logging.getLogger(__name__)
 
