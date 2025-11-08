@@ -1,6 +1,6 @@
 "use client";
 
-import { X, Copy, Plus } from "lucide-react";
+import { X, Copy, Plus, Search } from "lucide-react";
 import { Finding } from "@/types/finding";
 import { mockEvidence } from "@/data/mockFindings";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import { TriageStatusDropdown } from "@/components/triage/TriageStatusDropdown";
 import { AssigneeSelector } from "@/components/triage/AssigneeSelector";
 import { SLADetails } from "@/components/triage/SLATimer";
 import { CommentsSection } from "@/components/triage/CommentsSection";
+import { useState } from "react";
 
 interface FindingDetailsDrawerProps {
   finding: Finding | null;
@@ -24,6 +25,8 @@ interface FindingDetailsDrawerProps {
 
 export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerProps) => {
   const { addCustomToChat } = useFindingActions();
+  const [checkingExploits, setCheckingExploits] = useState(false);
+  const [exploitData, setExploitData] = useState<any>(null);
 
   if (!finding) return null;
 
@@ -31,6 +34,47 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
 
   const handleCopyCode = (code: string) => {
     cedar.util.copy(code);
+  };
+
+  const handleCheckExploits = async () => {
+    setCheckingExploits(true);
+    try {
+      // Get auth token from localStorage
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        toast.error("Authentication required");
+        return;
+      }
+
+      const API_BASE = process.env.NEXT_PUBLIC_SCANNER_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${API_BASE}/api/finding/${finding.id}/check-exploits`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setExploitData(data);
+
+      if (data.success && data.exploit_present) {
+        toast.success(data.message);
+      } else if (data.success) {
+        toast.info(data.message);
+      } else {
+        toast.error(data.message);
+      }
+    } catch (error: any) {
+      console.error('Failed to check exploits:', error);
+      toast.error(`Failed to check exploits: ${error.message}`);
+    } finally {
+      setCheckingExploits(false);
+    }
   };
 
   const handleAddToChat = (type: "full" | "overview" | "evidence" | "compliance") => {
@@ -167,9 +211,82 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
                   </pre>
                 </div>
 
+                {/* Week 6: Check for Exploits Button */}
+                <div className="border-t pt-4">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleCheckExploits}
+                    disabled={checkingExploits}
+                    className="mb-3"
+                  >
+                    <Search className="mr-2 h-3 w-3" />
+                    {checkingExploits ? "Searching GitHub..." : "Check for Public Exploits"}
+                  </Button>
+
+                  {exploitData && exploitData.success && (
+                    <div className="space-y-3">
+                      {exploitData.exploit_present ? (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="destructive" className="text-xs">
+                              ⚠️ Exploits Found
+                            </Badge>
+                            <span className="text-sm text-muted-foreground">
+                              Signal: {exploitData.exploit_signal}/10
+                            </span>
+                          </div>
+                          <div>
+                            <h4 className="font-medium text-sm mb-2 text-foreground">
+                              Public PoC Repositories ({exploitData.poc_repos.length})
+                            </h4>
+                            <ul className="space-y-2">
+                              {exploitData.poc_repos.map((repo: any, i: number) => (
+                                <li key={i} className="border-l-2 border-primary pl-3">
+                                  <a
+                                    href={repo.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-primary hover:underline text-sm font-medium"
+                                  >
+                                    {repo.name}
+                                  </a>
+                                  {repo.description && (
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                      {repo.description}
+                                    </p>
+                                  )}
+                                  <div className="flex gap-3 text-xs text-muted-foreground mt-1">
+                                    <span>⭐ {repo.stars} stars</span>
+                                    {repo.language && <span>📝 {repo.language}</span>}
+                                    <span>Updated: {new Date(repo.last_updated).toLocaleDateString()}</span>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                          <div className="text-xs text-muted-foreground bg-secondary p-3 rounded">
+                            <strong>Stats:</strong> {exploitData.stats.total_repos_found} total repos found
+                            {exploitData.stats.high_quality_repos > 0 && (
+                              <>, {exploitData.stats.high_quality_repos} high-quality (10+ stars)</>
+                            )}
+                            {exploitData.stats.recent_repos > 0 && (
+                              <>, {exploitData.stats.recent_repos} recently updated</>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-sm text-muted-foreground bg-secondary p-3 rounded">
+                          ✅ No public exploits found for this vulnerability
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {evidence.pocLinks.length > 0 && (
-                  <div>
-                    <h4 className="font-medium text-sm mb-2 text-foreground">POC Links</h4>
+                  <div className="border-t pt-4">
+                    <h4 className="font-medium text-sm mb-2 text-foreground">POC Links (from Evidence)</h4>
                     <ul className="space-y-1">
                       {evidence.pocLinks.map((link, i) => (
                         <li key={i}>
@@ -182,7 +299,7 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
                   </div>
                 )}
 
-                <Button variant="outline" size="sm" onClick={() => handleAddToChat("evidence")}>
+                <Button variant="outline" size="sm" onClick={() => handleAddToChat("evidence")} className="mt-4">
                   <Plus className="mr-2 h-3 w-3" />
                   Add Evidence to Chat
                 </Button>

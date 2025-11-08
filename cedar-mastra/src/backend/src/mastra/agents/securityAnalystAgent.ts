@@ -33,6 +33,7 @@ import { quickCoverageEnrichmentTool } from '../tools/quick-coverage-enrichment-
 import { remediationPrioritizationTool } from '../tools/remediation-prioritization-tool';
 import { queryGitHubAdvisoriesTool } from '../tools/query-github-advisories-tool';
 import { visualizeAttackPathTool } from '../tools/visualize-attack-path-tool';
+import { searchGitHubPocTool } from '../tools/search-github-poc-tool'; // Week 6: Exploit Intelligence
 // Removed fetchScanResultsTool - workflow handles fetching internally now
 import { scanAnalysisWorkflow } from '../workflows/scan-analysis-workflow';
 
@@ -268,6 +269,21 @@ When appropriate, proactively inform users about these capabilities:
 **When to mention**: User has multiple vulnerabilities and needs help deciding what to fix first
 **Tool**: \`remediationPrioritizationTool\`
 **What it does**: Prioritizes vulnerabilities based on exploitability, impact, and affected resources
+**Example prompt**: "I can help you prioritize these findings based on risk factors, exploitability, and business impact. Would you like me to generate a remediation roadmap?"
+
+### 🔓 GitHub PoC Search (Week 6: Exploit Intelligence)
+**When to use**: Proactively check for public exploits when analyzing any vulnerability with a CVE ID
+**Tool**: \`searchGitHubPocTool\`
+**What it does**: Searches GitHub for exploit/PoC repositories, returns exploit signal (0-10), and links to PoC code
+**Trigger phrases**:
+  - User asks "are there exploits for this?"
+  - When analyzing a CVE ID (e.g., CVE-2021-44228)
+  - User mentions "exploit availability" or "proof of concept"
+  - When assessing real-world exploitability
+**Parameters**: Pass cveId or vulnerabilityType, optionally language filter
+**Output**: Returns exploitPresent (boolean), exploitSignal (0-10), and top PoC repos with stars/recency
+**Example**: "I found CVE-2021-44228 (Log4Shell). Let me check for public exploits..." → call searchGitHubPocTool
+**Important**: This helps prioritize vulnerabilities - those with public exploits (signal 8+) should be fixed immediately
 
 ### 🎨 Visual Attack Path Generator (WOW FACTOR!)
 **When to use**: Proactively use this whenever discussing a vulnerability to make explanations more impactful!
@@ -285,8 +301,6 @@ When appropriate, proactively inform users about these capabilities:
   - If explaining multiple vulnerabilities, create one diagram per vulnerability rather than combining them
 **Example**: When analyzing a SQL injection: "Let me show you exactly how this attack works..." → call visualizeAttackPathTool
 **Parameters**: Pass vulnerability type, endpoint, method, severity, description, and optionally attackVector, impact, and affectedResources
-**What it does**: Analyzes findings and creates a prioritized fix order based on risk, exploitability, and business impact
-**Example prompt**: "I can help you prioritize these findings based on risk factors, exploitability, and business impact. Would you like me to generate a remediation roadmap?"
 
 ### 📥 Bulk Advisory Ingestion (Admin Only)
 **When to mention**: User is setting up the system or wants to bulk-load security data
@@ -335,6 +349,7 @@ When appropriate, proactively inform users about these capabilities:
     githubAdvisoryIngestionTool, // For admin/batch operations only
     queryGitHubAdvisoriesTool, // Query GitHub advisories for specific vulnerabilities/languages
     visualizeAttackPathTool, // Generate visual attack flow diagrams
+    searchGitHubPocTool, // Week 6: Search for public exploit/PoC repositories
   },
   
   // Enable conversation memory for multi-turn interactions

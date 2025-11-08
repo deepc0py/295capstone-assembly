@@ -7,6 +7,8 @@ import json
 import uuid
 import os
 import yaml
+import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -2946,6 +2948,227 @@ async def delete_api_key(
     return {
         "message": "API key deleted successfully",
         "key_id": key_id
+    }
+
+
+# ============================================================================
+# Week 6: Exploit Intelligence Endpoints
+# ============================================================================
+
+def search_github_for_pocs(cve_id: Optional[str] = None, vulnerability_type: Optional[str] = None, language: Optional[str] = None, max_results: int = 5) -> Dict:
+    """
+    Search GitHub for public exploit/PoC repositories.
+
+    Args:
+        cve_id: CVE ID to search for (e.g., "CVE-2021-44228")
+        vulnerability_type: Vulnerability type to search for (e.g., "SQL injection")
+        language: Programming language filter
+        max_results: Maximum number of repos to return (default: 5)
+
+    Returns:
+        Dictionary with exploit data: {
+            "success": bool,
+            "message": str,
+            "exploit_present": bool,
+            "exploit_signal": int (0-10),
+            "poc_repos": list of dicts,
+            "stats": dict
+        }
+    """
+    try:
+        # Check for GITHUB_TOKEN
+        github_token = os.getenv("GITHUB_TOKEN")
+        if not github_token:
+            return {
+                "success": False,
+                "message": "GITHUB_TOKEN environment variable not set",
+                "exploit_present": False,
+                "exploit_signal": 0,
+                "poc_repos": [],
+                "stats": {"total_repos_found": 0, "high_quality_repos": 0, "recent_repos": 0},
+                "error": "Missing GITHUB_TOKEN configuration"
+            }
+
+        # Build search query
+        if cve_id:
+            query = f'{cve_id} (exploit OR PoC OR poc OR "proof of concept")'
+        elif vulnerability_type:
+            query = f'"{vulnerability_type}" (exploit OR PoC OR "proof of concept")'
+        else:
+            return {
+                "success": False,
+                "message": "Must provide either cve_id or vulnerability_type",
+                "exploit_present": False,
+                "exploit_signal": 0,
+                "poc_repos": [],
+                "stats": {"total_repos_found": 0, "high_quality_repos": 0, "recent_repos": 0},
+                "error": "Missing required search parameter"
+            }
+
+        # Add language filter
+        if language:
+            query += f' language:{language}'
+
+        # Build GitHub API request
+        params = urllib.parse.urlencode({
+            'q': query,
+            'sort': 'stars',
+            'order': 'desc',
+            'per_page': min(max_results, 20)
+        })
+        url = f'https://api.github.com/search/repositories?{params}'
+
+        # Make request
+        req = urllib.request.Request(url)
+        req.add_header('Accept', 'application/vnd.github+json')
+        req.add_header('Authorization', f'Bearer {github_token}')
+        req.add_header('X-GitHub-Api-Version', '2022-11-28')
+
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+
+        # Process results
+        total_repos = data.get('total_count', 0)
+        items = data.get('items', [])[:max_results]
+
+        poc_repos = []
+        for repo in items:
+            poc_repos.append({
+                'name': repo['full_name'],
+                'url': repo['html_url'],
+                'description': repo.get('description'),
+                'stars': repo['stargazers_count'],
+                'language': repo.get('language'),
+                'last_updated': repo['updated_at']
+            })
+
+        # Calculate statistics
+        high_quality_repos = sum(1 for r in poc_repos if r['stars'] >= 10)
+
+        # Check recency (6 months)
+        from datetime import datetime, timedelta
+        six_months_ago = datetime.utcnow() - timedelta(days=180)
+        recent_repos = sum(1 for r in poc_repos
+                          if datetime.fromisoformat(r['last_updated'].replace('Z', '+00:00')) > six_months_ago)
+
+        # Calculate exploit signal (0-10 scale)
+        exploit_signal = 0
+        if total_repos > 0:
+            exploit_signal += 2  # Any repos found
+        if total_repos >= 5:
+            exploit_signal += 2  # Multiple repos
+        if high_quality_repos > 0:
+            exploit_signal += 3  # Quality repos exist
+        if recent_repos > 0:
+            exploit_signal += 2  # Recent activity
+        if poc_repos and poc_repos[0]['stars'] >= 50:
+            exploit_signal += 1  # Very popular PoC
+
+        exploit_present = total_repos > 0
+
+        # Format message
+        if total_repos == 0:
+            message = f"No public exploits found for {cve_id or vulnerability_type}"
+        else:
+            quality_text = f" ({high_quality_repos} high-quality)" if high_quality_repos > 0 else ""
+            recent_text = f", {recent_repos} recently updated" if recent_repos > 0 else ""
+            message = f"Found {total_repos} PoC repository(ies){quality_text}{recent_text}"
+
+        return {
+            "success": True,
+            "message": message,
+            "exploit_present": exploit_present,
+            "exploit_signal": exploit_signal,
+            "poc_repos": poc_repos,
+            "stats": {
+                "total_repos_found": total_repos,
+                "high_quality_repos": high_quality_repos,
+                "recent_repos": recent_repos
+            }
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to search GitHub: {str(e)}",
+            "exploit_present": False,
+            "exploit_signal": 0,
+            "poc_repos": [],
+            "stats": {"total_repos_found": 0, "high_quality_repos": 0, "recent_repos": 0},
+            "error": str(e)
+        }
+
+
+@app.post("/api/finding/{finding_id}/check-exploits")
+async def check_finding_exploits(
+    finding_id: str,
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
+    db: Session = Depends(get_db)
+):
+    """
+    Check GitHub for public exploits/PoCs related to this finding (Week 6).
+
+    Searches GitHub repositories for exploit code and updates the finding's
+    evidence JSONB with PoC links and exploit signal.
+
+    Requires: authenticated user
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid finding ID format")
+
+    # Get finding
+    from models import Finding
+    finding = db.query(Finding).filter(Finding.id == finding_uuid).first()
+
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    # Extract CVE ID or vulnerability type
+    cve_id = None
+    if finding.cve_ids and len(finding.cve_ids) > 0:
+        cve_id = finding.cve_ids[0]  # Use first CVE
+
+    vulnerability_type = finding.title
+
+    # Search GitHub
+    exploit_data = search_github_for_pocs(
+        cve_id=cve_id,
+        vulnerability_type=vulnerability_type if not cve_id else None,
+        max_results=5
+    )
+
+    # Update finding evidence
+    if exploit_data["success"]:
+        if finding.evidence is None:
+            finding.evidence = {}
+
+        finding.evidence["poc_links"] = [repo["url"] for repo in exploit_data["poc_repos"]]
+        finding.evidence["exploit_signal"] = exploit_data["exploit_signal"]
+        finding.evidence["exploit_present"] = exploit_data["exploit_present"]
+        finding.evidence["exploit_metadata"] = {
+            "total_repos": exploit_data["stats"]["total_repos_found"],
+            "high_quality_repos": exploit_data["stats"]["high_quality_repos"],
+            "recent_repos": exploit_data["stats"]["recent_repos"],
+            "last_checked": datetime.utcnow().isoformat(),
+            "top_poc_repos": exploit_data["poc_repos"][:3]  # Store top 3
+        }
+
+        # Mark as modified to trigger JSONB update
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(finding, "evidence")
+
+        db.commit()
+
+    return {
+        "success": exploit_data["success"],
+        "message": exploit_data["message"],
+        "finding_id": finding_id,
+        "exploit_present": exploit_data["exploit_present"],
+        "exploit_signal": exploit_data["exploit_signal"],
+        "poc_repos": exploit_data["poc_repos"],
+        "stats": exploit_data["stats"]
     }
 
 
