@@ -7,6 +7,10 @@ import { useCedarStore } from 'cedar-os';
 import { ScanConfigDialog, ScanConfig } from '@/components/security/ScanConfigDialog';
 import { scannerApi, ScanStatus } from '@/lib/scannerApi';
 import { useSecurityContext } from '@/app/cedar-os/context';
+import { EndpointClusterCard, EndpointCluster } from '@/components/analyst/EndpointClusterCard';
+import { EndpointClusterDrawer } from '@/components/analyst/EndpointClusterDrawer';
+import { FindingDetailsDrawer } from '@/components/analyst/FindingDetailsDrawer';
+import { Finding } from '@/types/finding';
 
 export default function SecurityDashboardPage() {
   const router = useRouter();
@@ -31,6 +35,12 @@ export default function SecurityDashboardPage() {
 
   // Track if component has mounted (prevents hydration errors)
   const [mounted, setMounted] = useState(false);
+
+  // Week 8: Correlation Engine state
+  const [endpointClusters, setEndpointClusters] = useState<EndpointCluster[]>([]);
+  const [loadingClusters, setLoadingClusters] = useState(false);
+  const [selectedCluster, setSelectedCluster] = useState<EndpointCluster | null>(null);
+  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -112,6 +122,51 @@ export default function SecurityDashboardPage() {
 
     return () => clearInterval(pollInterval);
   }, [activeScanId, scanResults?.status]);
+
+  // Week 8: Fetch endpoint clusters when scan results are available
+  useEffect(() => {
+    const fetchClusters = async () => {
+      if (!scanResults || !scanResults.scanId || scanResults.status !== 'completed') {
+        setEndpointClusters([]);
+        return;
+      }
+
+      setLoadingClusters(true);
+      try {
+        const token = localStorage.getItem('auth_token');
+        if (!token) {
+          console.warn('No auth token found, skipping cluster fetch');
+          setLoadingClusters(false);
+          return;
+        }
+
+        const API_BASE = process.env.NEXT_PUBLIC_SCANNER_API_URL || 'http://localhost:8000';
+        const response = await fetch(
+          `${API_BASE}/api/findings/clusters?scan_id=${scanResults.scanId}&group_by=endpoint`,
+          {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch clusters: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        setEndpointClusters(data.clusters || []);
+        console.log(`✅ Loaded ${data.clusters?.length || 0} endpoint clusters`);
+      } catch (error) {
+        console.error('Failed to fetch endpoint clusters:', error);
+        setEndpointClusters([]);
+      } finally {
+        setLoadingClusters(false);
+      }
+    };
+
+    fetchClusters();
+  }, [scanResults?.scanId, scanResults?.status]);
 
   const loadScanResults = (scanId: string, findings: any[]) => {
     // Reset added findings when loading new scan results
@@ -774,10 +829,48 @@ export default function SecurityDashboardPage() {
           </div>
         </div>
 
+        {/* Week 8: Endpoint Clusters - Correlation Engine */}
+        <div className="mb-12">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-2xl font-bold text-white mb-2">
+                Endpoint Vulnerability Clusters
+              </h2>
+              <p className="text-gray-400 text-sm">
+                Vulnerabilities grouped by endpoint for developer assignment. Click any cluster to see vulnerability type breakdown.
+              </p>
+            </div>
+            {loadingClusters && (
+              <div className="text-blue-400 text-sm flex items-center gap-2">
+                <span className="animate-spin">⏳</span>
+                Loading clusters...
+              </div>
+            )}
+          </div>
+
+          {endpointClusters.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {endpointClusters.map((cluster, index) => (
+                <EndpointClusterCard
+                  key={`${cluster.endpoint}-${cluster.method}-${index}`}
+                  cluster={cluster}
+                  onClick={() => setSelectedCluster(cluster)}
+                />
+              ))}
+            </div>
+          ) : !loadingClusters && scanResults ? (
+            <div className="bg-gray-800 rounded-lg p-8 border border-gray-700 text-center">
+              <p className="text-gray-400">
+                No endpoint clusters found. Clusters will appear when vulnerabilities are detected.
+              </p>
+            </div>
+          ) : null}
+        </div>
+
         {/* Vulnerabilities by Endpoint */}
         <div className="space-y-6">
           <h2 className="text-2xl font-bold text-white mb-4">
-            Vulnerabilities by Endpoint (Sorted by Severity)
+            All Vulnerabilities (Sorted by Severity)
           </h2>
 
           {Object.entries(scanResults.groupedByEndpoint)
@@ -860,6 +953,22 @@ export default function SecurityDashboardPage() {
         onClose={() => setShowScanDialog(false)}
         onSubmit={handleScanSubmit}
         isLoading={isScanning}
+      />
+
+      {/* Week 8: Endpoint Cluster Drawer */}
+      <EndpointClusterDrawer
+        cluster={selectedCluster}
+        onClose={() => setSelectedCluster(null)}
+        onFindingClick={(finding) => {
+          setSelectedFinding(finding);
+          setSelectedCluster(null); // Close cluster drawer when opening finding drawer
+        }}
+      />
+
+      {/* Week 8: Finding Details Drawer (from cluster view) */}
+      <FindingDetailsDrawer
+        finding={selectedFinding}
+        onClose={() => setSelectedFinding(null)}
       />
 
       {/* Global Cedar Chat from layout.tsx is used - no need for page-specific chat */}

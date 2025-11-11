@@ -3366,6 +3366,307 @@ async def export_to_jira(
 
 
 # ============================================================================
+# Week 8: Correlation Engine - Vulnerability Clustering
+# ============================================================================
+
+@app.get("/api/findings/clusters")
+async def get_finding_clusters(
+    scan_id: str,
+    group_by: str = "endpoint",
+    current_user: Dict = Depends(rbac.get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get vulnerability clusters grouped by endpoint or vulnerability type.
+
+    Week 8: Correlation Engine - Groups findings to identify blast radius
+    and help developers understand which endpoints need attention.
+
+    Grouping strategies:
+    - "endpoint": Groups by API endpoint (e.g., /api/users/{id})
+      - Shows which endpoints have the most vulnerabilities
+      - Useful for assigning work to endpoint owners
+      - Default and recommended for developer workflow
+
+    - "vulnerability_type": Groups by OWASP rule (e.g., SQL Injection, BOLA)
+      - Shows prevalence of each vulnerability type across the API
+      - Useful for security-wide remediation efforts
+
+    Args:
+        scan_id (str): UUID of the scan to cluster
+        group_by (str): Clustering dimension - "endpoint" or "vulnerability_type"
+
+    Returns:
+        JSON with:
+        - clusters: List of cluster objects with counts, severity breakdown
+        - total_findings: Total number of findings in scan
+        - total_clusters: Number of clusters found
+        - group_by: Echo of grouping strategy used
+
+    Security:
+        - Requires authentication (JWT token)
+        - RBAC enforced via get_current_active_user
+        - User can only see findings from their scans
+
+    Example Response (group_by=endpoint):
+        {
+            "clusters": [
+                {
+                    "endpoint": "/api/users/{id}",
+                    "method": "GET",
+                    "vuln_count": 8,
+                    "critical_count": 3,
+                    "high_count": 3,
+                    "medium_count": 2,
+                    "low_count": 0,
+                    "max_severity": "Critical",
+                    "vuln_types": ["SQL Injection", "BOLA", "Mass Assignment"],
+                    "findings": [
+                        {
+                            "id": "abc-123",
+                            "title": "SQL Injection in user lookup",
+                            "severity": "Critical",
+                            "rule": "SQL Injection",
+                            "description": "...",
+                            "score": 9.1
+                        },
+                        ...
+                    ]
+                },
+                ...
+            ],
+            "total_findings": 45,
+            "total_clusters": 12,
+            "group_by": "endpoint"
+        }
+    """
+    print(f"\n🔍 Clustering findings for scan {scan_id} by {group_by}")
+
+    try:
+        # 1. Validate scan_id format
+        try:
+            scan_uuid = uuid.UUID(scan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid scan_id format")
+
+        # 2. Verify scan exists and user has access
+        scan = db.query(Scan).filter(Scan.id == scan_uuid).first()
+        if not scan:
+            raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found")
+
+        # 3. RBAC: Verify scan belongs to current user's organization
+        if current_user["role"] != "admin" and scan.created_by != current_user["username"]:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to view this scan's findings"
+            )
+
+        # 4. Fetch all findings for this scan
+        findings = db.query(Finding).filter(Finding.scan_id == scan_uuid).all()
+
+        if not findings:
+            return {
+                "clusters": [],
+                "total_findings": 0,
+                "total_clusters": 0,
+                "group_by": group_by,
+                "message": f"No findings found for scan {scan_id}"
+            }
+
+        print(f"   Found {len(findings)} findings to cluster")
+
+        # 5. Build clusters based on grouping strategy
+        clusters = []
+
+        if group_by == "endpoint":
+            # Group by (endpoint, method) combination
+            from collections import defaultdict
+            endpoint_map = defaultdict(list)
+
+            for finding in findings:
+                # Key: (endpoint, method) tuple
+                key = (finding.endpoint, finding.method)
+                endpoint_map[key].append(finding)
+
+            # Build cluster objects
+            for (endpoint, method), cluster_findings in endpoint_map.items():
+                # Count severities
+                severity_counts = {
+                    "Critical": 0,
+                    "High": 0,
+                    "Medium": 0,
+                    "Low": 0,
+                    "Info": 0
+                }
+
+                for f in cluster_findings:
+                    severity = f.severity
+                    if severity in severity_counts:
+                        severity_counts[severity] += 1
+
+                # Determine max severity (for sorting)
+                severity_order = ["Critical", "High", "Medium", "Low", "Info"]
+                max_severity = "Info"
+                for sev in severity_order:
+                    if severity_counts[sev] > 0:
+                        max_severity = sev
+                        break
+
+                # Get unique vulnerability types
+                vuln_types = sorted(list(set(f.rule for f in cluster_findings if f.rule)))
+
+                # Build finding summaries
+                finding_summaries = []
+                for f in cluster_findings:
+                    finding_summaries.append({
+                        "id": str(f.id),
+                        "title": f.title,
+                        "severity": f.severity,
+                        "rule": f.rule,
+                        "description": f.description[:200] + "..." if f.description and len(f.description) > 200 else f.description,
+                        "score": f.score,
+                        "method": f.method,
+                        "endpoint": f.endpoint,
+                        "triage_status": f.triage_status,
+                        "assignee": f.assignee
+                    })
+
+                # Sort findings by severity (Critical first)
+                finding_summaries.sort(key=lambda x: severity_order.index(x["severity"]) if x["severity"] in severity_order else 999)
+
+                cluster = {
+                    "endpoint": endpoint,
+                    "method": method,
+                    "vuln_count": len(cluster_findings),
+                    "critical_count": severity_counts["Critical"],
+                    "high_count": severity_counts["High"],
+                    "medium_count": severity_counts["Medium"],
+                    "low_count": severity_counts["Low"],
+                    "info_count": severity_counts["Info"],
+                    "max_severity": max_severity,
+                    "vuln_types": vuln_types,
+                    "findings": finding_summaries
+                }
+
+                clusters.append(cluster)
+
+            # Sort clusters by:
+            # 1. Critical count (descending)
+            # 2. High count (descending)
+            # 3. Total vuln count (descending)
+            clusters.sort(
+                key=lambda c: (
+                    -c["critical_count"],
+                    -c["high_count"],
+                    -c["vuln_count"]
+                )
+            )
+
+        elif group_by == "vulnerability_type":
+            # Group by vulnerability rule (OWASP category)
+            from collections import defaultdict
+            vuln_type_map = defaultdict(list)
+
+            for finding in findings:
+                vuln_type = finding.rule or "Unknown"
+                vuln_type_map[vuln_type].append(finding)
+
+            # Build cluster objects
+            for vuln_type, cluster_findings in vuln_type_map.items():
+                # Count severities
+                severity_counts = {
+                    "Critical": 0,
+                    "High": 0,
+                    "Medium": 0,
+                    "Low": 0,
+                    "Info": 0
+                }
+
+                for f in cluster_findings:
+                    severity = f.severity
+                    if severity in severity_counts:
+                        severity_counts[severity] += 1
+
+                # Determine max severity
+                severity_order = ["Critical", "High", "Medium", "Low", "Info"]
+                max_severity = "Info"
+                for sev in severity_order:
+                    if severity_counts[sev] > 0:
+                        max_severity = sev
+                        break
+
+                # Get unique endpoints affected
+                affected_endpoints = sorted(list(set(f"{f.method} {f.endpoint}" for f in cluster_findings)))
+
+                # Build finding summaries
+                finding_summaries = []
+                for f in cluster_findings:
+                    finding_summaries.append({
+                        "id": str(f.id),
+                        "title": f.title,
+                        "severity": f.severity,
+                        "rule": f.rule,
+                        "description": f.description[:200] + "..." if f.description and len(f.description) > 200 else f.description,
+                        "score": f.score,
+                        "method": f.method,
+                        "endpoint": f.endpoint,
+                        "triage_status": f.triage_status,
+                        "assignee": f.assignee
+                    })
+
+                # Sort findings by severity
+                finding_summaries.sort(key=lambda x: severity_order.index(x["severity"]) if x["severity"] in severity_order else 999)
+
+                cluster = {
+                    "vulnerability_type": vuln_type,
+                    "vuln_count": len(cluster_findings),
+                    "critical_count": severity_counts["Critical"],
+                    "high_count": severity_counts["High"],
+                    "medium_count": severity_counts["Medium"],
+                    "low_count": severity_counts["Low"],
+                    "info_count": severity_counts["Info"],
+                    "max_severity": max_severity,
+                    "affected_endpoints": affected_endpoints,
+                    "findings": finding_summaries
+                }
+
+                clusters.append(cluster)
+
+            # Sort clusters by critical count, then high count, then total count
+            clusters.sort(
+                key=lambda c: (
+                    -c["critical_count"],
+                    -c["high_count"],
+                    -c["vuln_count"]
+                )
+            )
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid group_by parameter: {group_by}. Must be 'endpoint' or 'vulnerability_type'"
+            )
+
+        print(f"✅ Created {len(clusters)} clusters from {len(findings)} findings")
+
+        return {
+            "clusters": clusters,
+            "total_findings": len(findings),
+            "total_clusters": len(clusters),
+            "group_by": group_by,
+            "scan_id": scan_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Clustering failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Clustering failed: {str(e)}")
+
+
+# ============================================================================
 # End of RBAC Endpoints
 # ============================================================================
 
