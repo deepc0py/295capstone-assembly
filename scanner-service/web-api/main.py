@@ -3173,6 +3173,199 @@ async def check_finding_exploits(
 
 
 # ============================================================================
+# Week 7: Evidence Collection Automation Endpoints
+# ============================================================================
+
+@app.post("/api/finding/{finding_id}/generate-curl")
+async def generate_curl_command(
+    finding_id: str,
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
+    db: Session = Depends(get_db)
+):
+    """
+    Generate cURL command to reproduce the vulnerability (Week 7).
+
+    Parses the finding's evidence to create a complete cURL command with
+    headers, method, body, and endpoint.
+
+    Requires: authenticated user
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid finding ID format")
+
+    # Get finding
+    from models import Finding
+    finding = db.query(Finding).filter(Finding.id == finding_uuid).first()
+
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    # Extract evidence
+    evidence = finding.evidence or {}
+
+    # Build cURL command
+    curl_command = f"curl -X {finding.method}"
+
+    # Add endpoint URL
+    curl_command += f" '{finding.endpoint}'"
+
+    # Add headers from evidence
+    headers = evidence.get("headers", {})
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            # Escape single quotes in header values
+            safe_value = str(value).replace("'", "'\\''")
+            curl_command += f" \\\n  -H '{key}: {safe_value}'"
+
+    # Add request body if present
+    request_body = evidence.get("request_body") or evidence.get("body")
+    if request_body:
+        if isinstance(request_body, dict):
+            body_json = json.dumps(request_body)
+            safe_body = body_json.replace("'", "'\\''")
+            curl_command += f" \\\n  -d '{safe_body}'"
+        elif isinstance(request_body, str):
+            safe_body = request_body.replace("'", "'\\''")
+            curl_command += f" \\\n  -d '{safe_body}'"
+
+    # Add verbose flag
+    curl_command += " \\\n  -v"
+
+    # Generate reproduction steps
+    reproduction_steps = [
+        "1. Copy the cURL command above",
+        "2. Replace the endpoint URL with your target server",
+        "3. Run the command in your terminal",
+        "4. Verify the response matches the expected vulnerability behavior"
+    ]
+
+    # Get expected response
+    expected_response = None
+    if "response" in evidence:
+        response_data = evidence["response"]
+        if isinstance(response_data, str):
+            expected_response = response_data[:500] + "..." if len(response_data) > 500 else response_data
+        elif isinstance(response_data, dict):
+            expected_response = json.dumps(response_data, indent=2)[:500]
+
+    return {
+        "success": True,
+        "finding_id": finding_id,
+        "curl_command": curl_command,
+        "reproduction_steps": reproduction_steps,
+        "expected_response": expected_response,
+        "method": finding.method,
+        "endpoint": finding.endpoint
+    }
+
+
+@app.post("/api/finding/{finding_id}/export-jira")
+async def export_to_jira(
+    finding_id: str,
+    current_user: Dict = Depends(rbac.get_current_active_user),  # Week 4: RBAC
+    db: Session = Depends(get_db)
+):
+    """
+    Export finding as Jira-compatible markdown (Week 7).
+
+    Creates a markdown-formatted ticket description that can be copy-pasted
+    into Jira or other issue tracking systems.
+
+    Requires: authenticated user
+    """
+    try:
+        finding_uuid = UUIDType(finding_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid finding ID format")
+
+    # Get finding
+    from models import Finding
+    finding = db.query(Finding).filter(Finding.id == finding_uuid).first()
+
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    # Get triage info if available
+    triage_info = ""
+    if finding.triage:
+        triage_info = f"""
+## Triage Information
+- **Status**: {finding.triage.status}
+- **Assigned To**: {finding.triage.assigned_to or 'Unassigned'}
+- **SLA Deadline**: {finding.triage.sla_deadline.isoformat() if finding.triage.sla_deadline else 'Not set'}
+- **Priority Override**: {finding.triage.priority_override if finding.triage.priority_override else 'Default'}
+"""
+
+    # Generate cURL command
+    evidence = finding.evidence or {}
+    curl_command = f"curl -X {finding.method} '{finding.endpoint}'"
+
+    # Format CWE/CVE lists
+    cwe_list = ", ".join(finding.cwe_ids) if finding.cwe_ids else "Not specified"
+    cve_list = ", ".join(finding.cve_ids) if finding.cve_ids else "Not specified"
+
+    # Build Jira-compatible markdown
+    markdown = f"""# [{finding.severity}] {finding.title}
+
+## Summary
+{finding.description or 'No description available'}
+
+## Affected Endpoint
+```
+{finding.method} {finding.endpoint}
+```
+
+## Security Classification
+- **OWASP API Security**: {finding.rule}
+- **Severity**: {finding.severity}
+- **CVSS Score**: {finding.score if finding.score else 'Not scored'}
+- **CWE IDs**: {cwe_list}
+- **CVE IDs**: {cve_list}
+- **Scanner**: {finding.scanner}
+
+## Reproduction
+### cURL Command
+```bash
+{curl_command}
+```
+
+### Steps to Reproduce
+1. Execute the cURL command above against the vulnerable endpoint
+2. Observe the response for security issues
+3. Verify the vulnerability behavior matches the description
+
+## Evidence
+```json
+{json.dumps(evidence, indent=2)[:1000]}{"..." if len(json.dumps(evidence)) > 1000 else ""}
+```
+
+{triage_info}
+
+## First Detected
+**First Seen**: {finding.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}
+**Finding ID**: `{finding.id}`
+**Scan ID**: `{finding.scan_id}`
+
+## Remediation Guidance
+(See security analysis from VentiAPI Scanner for detailed remediation steps)
+
+---
+*Generated by VentiAPI Scanner - Week 7: Evidence Collection Automation*
+"""
+
+    return {
+        "success": True,
+        "finding_id": finding_id,
+        "markdown": markdown,
+        "title": f"[{finding.severity}] {finding.title}",
+        "severity": finding.severity,
+        "endpoint": finding.endpoint
+    }
+
+
+# ============================================================================
 # End of RBAC Endpoints
 # ============================================================================
 

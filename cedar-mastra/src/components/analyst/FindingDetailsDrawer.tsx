@@ -1,6 +1,6 @@
 "use client";
 
-import { X, Copy, Plus, Search } from "lucide-react";
+import { X, Copy, Plus, Search, Terminal, FileText } from "lucide-react";
 import { Finding } from "@/types/finding";
 import { mockEvidence } from "@/data/mockFindings";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,9 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
   const { addCustomToChat } = useFindingActions();
   const [checkingExploits, setCheckingExploits] = useState(false);
   const [exploitData, setExploitData] = useState<any>(null);
+  const [generatingCurl, setGeneratingCurl] = useState(false);
+  const [curlData, setCurlData] = useState<any>(null);
+  const [exportingJira, setExportingJira] = useState(false);
 
   if (!finding) return null;
 
@@ -34,6 +37,7 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
 
   const handleCopyCode = (code: string) => {
     cedar.util.copy(code);
+    toast.success("Copied to clipboard");
   };
 
   const handleCheckExploits = async () => {
@@ -74,6 +78,74 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
       toast.error(`Failed to check exploits: ${error.message}`);
     } finally {
       setCheckingExploits(false);
+    }
+  };
+
+  const handleGenerateCurl = async () => {
+    setGeneratingCurl(true);
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        toast.error("Authentication required");
+        return;
+      }
+
+      const API_BASE = process.env.NEXT_PUBLIC_SCANNER_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${API_BASE}/api/finding/${finding.id}/generate-curl`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setCurlData(data);
+      toast.success("cURL command generated");
+    } catch (error: any) {
+      console.error('Failed to generate cURL:', error);
+      toast.error(`Failed to generate cURL: ${error.message}`);
+    } finally {
+      setGeneratingCurl(false);
+    }
+  };
+
+  const handleExportJira = async () => {
+    setExportingJira(true);
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        toast.error("Authentication required");
+        return;
+      }
+
+      const API_BASE = process.env.NEXT_PUBLIC_SCANNER_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${API_BASE}/api/finding/${finding.id}/export-jira`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Copy markdown to clipboard
+      cedar.util.copy(data.markdown);
+      toast.success("Jira ticket markdown copied to clipboard");
+    } catch (error: any) {
+      console.error('Failed to export to Jira:', error);
+      toast.error(`Failed to export to Jira: ${error.message}`);
+    } finally {
+      setExportingJira(false);
     }
   };
 
@@ -278,6 +350,70 @@ export const FindingDetailsDrawer = ({ finding, onClose }: FindingDetailsDrawerP
                       ) : (
                         <div className="text-sm text-muted-foreground bg-secondary p-3 rounded">
                           ✅ No public exploits found for this vulnerability
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Week 7: Evidence Collection Automation */}
+                <div className="border-t pt-4 space-y-3">
+                  <h4 className="font-medium text-sm text-foreground">Reproduction Tools</h4>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleGenerateCurl}
+                      disabled={generatingCurl}
+                    >
+                      <Terminal className="mr-2 h-3 w-3" />
+                      {generatingCurl ? "Generating..." : "Generate cURL"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleExportJira}
+                      disabled={exportingJira}
+                    >
+                      <FileText className="mr-2 h-3 w-3" />
+                      {exportingJira ? "Exporting..." : "Export to Jira"}
+                    </Button>
+                  </div>
+
+                  {curlData && curlData.success && (
+                    <div className="space-y-3">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-medium text-sm text-foreground">cURL Command</h4>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleCopyCode(curlData.curl_command)}
+                          >
+                            <Copy className="h-3 w-3 mr-1" />
+                            Copy
+                          </Button>
+                        </div>
+                        <pre className="bg-secondary p-4 rounded text-xs font-mono overflow-x-auto">
+                          {curlData.curl_command}
+                        </pre>
+                      </div>
+
+                      <div className="bg-secondary p-3 rounded">
+                        <h5 className="font-medium text-xs text-foreground mb-2">Reproduction Steps:</h5>
+                        <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+                          {curlData.reproduction_steps.map((step: string, i: number) => (
+                            <li key={i}>{step.replace(/^\d+\.\s*/, '')}</li>
+                          ))}
+                        </ol>
+                      </div>
+
+                      {curlData.expected_response && (
+                        <div>
+                          <h5 className="font-medium text-xs text-foreground mb-2">Expected Response (truncated):</h5>
+                          <pre className="bg-secondary p-3 rounded text-xs font-mono overflow-x-auto max-h-32">
+                            {curlData.expected_response}
+                          </pre>
                         </div>
                       )}
                     </div>
